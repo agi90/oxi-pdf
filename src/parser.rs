@@ -1020,21 +1020,34 @@ fn xref_entry<'a>(mut data: &'a [u8]) -> Res<'a, XrefEntry> {
     return Res::found(XrefEntry { offset, generation_number, type_ }, data);
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+struct XrefKey {
+    object_number: u64,
+    generation_number: u64,
+}
+
+impl XrefKey {
+    pub fn new(object_number: u64, generation_number: u64) -> XrefKey {
+        XrefKey { object_number, generation_number }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Xref {
     offset: usize,
-    object_number: u64,
-    generation_number: u64,
     type_: XrefType,
+    key: XrefKey,
 }
 
 impl Xref {
     pub fn from(entry: XrefEntry, object_number: u64) -> Xref {
         Xref {
             offset: entry.offset,
-            object_number: object_number,
-            generation_number: entry.generation_number,
             type_: entry.type_,
+            key: XrefKey {
+                object_number,
+                generation_number: entry.generation_number,
+            },
         }
     }
 
@@ -1042,19 +1055,21 @@ impl Xref {
             type_: XrefType) -> Xref {
         Xref {
             offset,
-            object_number,
-            generation_number,
             type_,
+            key: XrefKey {
+                object_number,
+                generation_number,
+            },
         }
     }
 }
 
 // 7.5.4
-fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, Vec<Xref>> {
+fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<XrefKey, Xref>> {
     exact!(data, "xref");
     data = consume_whitespace(data);
 
-    let mut xref_table = vec![];
+    let mut xref_table = HashMap::new();
     loop {
         let object_number = repeat!(data, nonnegative_integer);
         data = consume_whitespace(data);
@@ -1063,8 +1078,9 @@ fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, Vec<Xref>> {
         data = consume_whitespace(data);
 
         for i in 0..entries {
-            let xref = block!(data, xref_entry);
-            xref_table.push(Xref::from(xref, object_number as u64 + i));
+            let xref_entry = block!(data, xref_entry);
+            let xref = Xref::from(xref_entry, object_number as u64 + i);
+            xref_table.insert(xref.key, xref);
         }
     }
 
@@ -1093,7 +1109,7 @@ fn trailer<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
 pub struct Pdf {
     version: Version,
     objects: Vec<Definition>,
-    xref_table: Vec<Xref>,
+    xref_table: HashMap<XrefKey, Xref>,
     trailer: PdfDictionary,
     startxref: u64,
 }
@@ -1567,10 +1583,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 XrefEntry::new(3, 0, XrefType::InUse), "");
     }
 
-    test!(xref_table_test, xref_table, Vec<Xref>);
+    test!(xref_table_test, xref_table, HashMap<XrefKey, Xref>);
+
     #[test]
     fn test_xref_table() {
-        xref_table_test("xref", vec![], "");
+        xref_table_test("xref", HashMap::new(), "");
         xref_table_test("xref\n\
             0 6\n\
             0000000003 65535 f\r\n\
@@ -1579,14 +1596,13 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000000000 00007 f\r\n\
             0000000331 00000 n\r\n\
             0000000409 00000 n\r\n",
-        vec![
-            Xref::new(3,   0, 65535, XrefType::Free),
-            Xref::new(17,  1, 0,     XrefType::InUse),
-            Xref::new(81,  2, 0,     XrefType::InUse),
-            Xref::new(0,   3, 7,     XrefType::Free),
-            Xref::new(331, 4, 0,     XrefType::InUse),
-            Xref::new(409, 5, 0,     XrefType::InUse),
-        ], "");
+        [(XrefKey::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
+         (XrefKey::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
+         (XrefKey::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
+         (XrefKey::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
+         (XrefKey::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
+         (XrefKey::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
+        ].iter().cloned().collect(), "");
         xref_table_test("xref\n\
             0 1\n\
             0000000000 65535 f\r\n\
@@ -1597,13 +1613,12 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000025635 00000 n\r\n\
             30 1\n\
             0000025777 00000 n\r\n",
-        vec![
-            Xref::new(0,     0,  65535, XrefType::Free),
-            Xref::new(25325, 3,  0,     XrefType::InUse),
-            Xref::new(25518, 23, 2,     XrefType::InUse),
-            Xref::new(25635, 24, 0,     XrefType::InUse),
-            Xref::new(25777, 30, 0,     XrefType::InUse),
-        ], "");
+        [(XrefKey::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
+         (XrefKey::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
+         (XrefKey::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
+         (XrefKey::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
+         (XrefKey::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
+        ].iter().cloned().collect(), "");
     }
 
     test!(eof_test, eof, ());
