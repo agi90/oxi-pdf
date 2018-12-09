@@ -1195,7 +1195,7 @@ mod test {
         until_eol_test("test", "test", "");
     }
 
-    test!(string_comment_test, string_t comment);
+    test!(string_comment_test, string_comment);
 
     #[test]
     fn test_comment() {
