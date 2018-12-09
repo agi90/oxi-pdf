@@ -5,3 +5,6 @@ intended for use.
 WebAssembly support and focus on performance and safety.
 
 This project is licensed according to the MIT license, see [LICENSE](LICENSE.md).
+
+This project follows the PDF `ISO 32000-1` standard, a copy is available
+[here](https://www.adobe.com/content/dam/acom/en/devnet/pdf/pdfs/PDF32000_2008.pdf).
