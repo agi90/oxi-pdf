@@ -49,7 +49,7 @@ const ASCII_TILDE: u8                = 0x7E;
 type PdfDictionary = HashMap<String, PdfObject>;
 
 fn resolve_dictionary<F>(dictionary: PdfDictionary, resolve: &mut F) -> PdfDictionary
-where F: FnMut(&Reference) -> PdfObject {
+where F: FnMut(&Key) -> PdfObject {
     let mut result = HashMap::new();
 
     for (key, object) in dictionary {
@@ -666,28 +666,28 @@ fn identifier_escape<'a>(mut data: &'a [u8]) -> Res<'a, u8> {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct Reference {
+struct Key {
     object: u64,
     generation: u64,
 }
 
-impl Reference {
-    pub fn new(object: u64, generation: u64) -> Reference {
-        Reference {
-            object: object,
-            generation: generation,
+impl Key {
+    pub fn new(object: u64, generation: u64) -> Key {
+        Key {
+            object,
+            generation,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct Definition {
-    key: Reference,
+    key: Key,
     object: PdfObject,
 }
 
 impl Definition {
-    pub fn new(key: Reference, object: PdfObject) -> Definition {
+    pub fn new(key: Key, object: PdfObject) -> Definition {
         Definition {
             key,
             object,
@@ -732,7 +732,7 @@ impl StreamMetadata {
 enum PdfObject {
     Array(Vec<PdfObject>),
     Boolean(bool),
-    Reference(Reference),
+    Reference(Key),
     Dictionary(HashMap<String, PdfObject>),
     Float(f64),
     Identifier(String),
@@ -752,7 +752,7 @@ impl PdfObject {
     }
 
     fn reference(object: u64, generation: u64) -> PdfObject {
-        PdfObject::Reference(Reference::new(object, generation))
+        PdfObject::Reference(Key::new(object, generation))
     }
 }
 
@@ -783,7 +783,7 @@ fn identifier<'a>(mut data: &'a [u8]) -> Res<'a, String> {
     Res::string(result, data)
 }
 
-fn reference_header<'a>(mut data: &'a [u8]) -> Res<'a, Reference> {
+fn reference_header<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
     let object = block!(data, integer);
     data = consume_whitespace(data);
 
@@ -793,11 +793,11 @@ fn reference_header<'a>(mut data: &'a [u8]) -> Res<'a, Reference> {
         return Res::NotFound;
     }
 
-    Res::found(Reference::new(object as u64, generation as u64), data)
+    Res::found(Key::new(object as u64, generation as u64), data)
 }
 
 // 7.3.10
-fn reference<'a>(mut data: &'a [u8]) -> Res<'a, Reference> {
+fn reference<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
     let reference = block!(data, reference_header);
 
     data = consume_whitespace(data);
@@ -825,7 +825,7 @@ fn definition<'a>(mut data: &'a [u8]) -> Res<'a, Definition> {
 
 fn stream_definition<'a, F>(mut data: &'a [u8],
                             resolve: &mut F) -> Res<'a, Definition>
-where F: FnMut(&Reference) -> PdfObject {
+where F: FnMut(&Key) -> PdfObject {
     let reference = block!(data, reference_header);
     data = consume_whitespace(data);
 
@@ -843,7 +843,7 @@ where F: FnMut(&Reference) -> PdfObject {
 
 // 7.3.8.1
 fn stream<'a, F>(mut data: &'a [u8], resolve: &mut F) -> Res<'a, Stream>
-where F: FnMut(&Reference) -> PdfObject {
+where F: FnMut(&Key) -> PdfObject {
     let dict = resolve_dictionary(block!(data, dictionary), resolve);
 
     let metadata;
@@ -1040,7 +1040,7 @@ fn xref_entry<'a>(mut data: &'a [u8]) -> Res<'a, XrefEntry> {
 struct Xref {
     offset: usize,
     type_: XrefType,
-    key: Reference,
+    key: Key,
 }
 
 impl Xref {
@@ -1048,7 +1048,7 @@ impl Xref {
         Xref {
             offset: entry.offset,
             type_: entry.type_,
-            key: Reference {
+            key: Key {
                 object: object_number,
                 generation: entry.generation_number,
             },
@@ -1060,7 +1060,7 @@ impl Xref {
         Xref {
             offset,
             type_,
-            key: Reference {
+            key: Key {
                 object: object_number,
                 generation: generation_number,
             },
@@ -1069,7 +1069,7 @@ impl Xref {
 }
 
 // 7.5.4
-fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<Reference, Xref>> {
+fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<Key, Xref>> {
     exact!(data, "xref");
     data = consume_whitespace(data);
 
@@ -1112,8 +1112,8 @@ fn trailer<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
 #[derive(Debug)]
 pub struct Pdf {
     version: Version,
-    objects: HashMap<Reference, PdfObject>,
-    xref_table: HashMap<Reference, Xref>,
+    objects: HashMap<Key, PdfObject>,
+    xref_table: HashMap<Key, Xref>,
     trailer: PdfDictionary,
     startxref: u64,
 }
@@ -1166,7 +1166,7 @@ fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
 
     let trailer = block!(xref_data, trailer);
     xref_data = consume_whitespace(xref_data);
-    
+
     // We should be back at startxref now
     block!(xref_data, startxref);
 
@@ -1204,8 +1204,8 @@ fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
     }, &[])
 }
 
-fn resolve<'a>(key: &Reference, xref: &HashMap<Reference, Xref>,
-           objects: &'a mut HashMap<Reference, PdfObject>,
+fn resolve<'a>(key: &Key, xref: &HashMap<Key, Xref>,
+           objects: &'a mut HashMap<Key, PdfObject>,
            data: &[u8]) -> &'a PdfObject {
     if objects.contains_key(key) {
         return objects.get(key).unwrap();
@@ -1560,7 +1560,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
         ], "");
     }
 
-    test!(reference_test, reference, Reference);
+    test!(reference_test, reference, Key);
 
     #[test]
     fn test_reference() {
@@ -1568,10 +1568,10 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
         assert_eq!(reference("-1 0 R".as_bytes()), Res::NotFound);
         assert_eq!(reference("1 0 M".as_bytes()), Res::NotFound);
 
-        reference_test("17 0 R", Reference::new(17, 0), "");
-        reference_test("1 0 R", Reference::new(1, 0), "");
-        reference_test("1 10 R", Reference::new(1, 10), "");
-        reference_test("1 10 Rtest", Reference::new(1, 10), "test");
+        reference_test("17 0 R", Key::new(17, 0), "");
+        reference_test("1 0 R", Key::new(1, 0), "");
+        reference_test("1 10 R", Key::new(1, 10), "");
+        reference_test("1 10 Rtest", Key::new(1, 10), "test");
     }
 
     test!(definition_test, definition, Definition);
@@ -1582,11 +1582,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 (Brilling)
             endobj",
             Definition::new(
-                Reference::new(12, 0),
+                Key::new(12, 0),
                 PdfObject::string("Brilling")), "");
     }
 
-    fn stream_test(data: &str, expected: &str, remaining: &str, objects: HashMap<Reference, PdfObject>) {
+    fn stream_test(data: &str, expected: &str, remaining: &str, objects: HashMap<Key, PdfObject>) {
         let result = stream(data.as_bytes(), &mut |key|
             objects.get(key).unwrap_or(&PdfObject::Null).clone()).unwrap();
         assert_eq!(from_bytes(&result.data.data[..]).as_str(), expected);
@@ -1606,7 +1606,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             stream\n\
                 123456789012\n\
             endstream", "123456789012", "",
-            [(Reference::new(8, 0), PdfObject::Integer(12))]
+            [(Key::new(8, 0), PdfObject::Integer(12))]
                 .iter().cloned().collect());
     }
 
@@ -1657,7 +1657,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 XrefEntry::new(3, 0, XrefType::InUse), "");
     }
 
-    test!(xref_table_test, xref_table, HashMap<Reference, Xref>);
+    test!(xref_table_test, xref_table, HashMap<Key, Xref>);
 
     #[test]
     fn test_xref_table() {
@@ -1670,12 +1670,12 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000000000 00007 f\r\n\
             0000000331 00000 n\r\n\
             0000000409 00000 n\r\n",
-        [(Reference::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
-         (Reference::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
-         (Reference::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
-         (Reference::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
-         (Reference::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
-         (Reference::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
+        [(Key::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
+         (Key::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
+         (Key::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
+         (Key::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
+         (Key::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
+         (Key::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
         xref_table_test("xref\n\
             0 1\n\
@@ -1687,11 +1687,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000025635 00000 n\r\n\
             30 1\n\
             0000025777 00000 n\r\n",
-        [(Reference::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
-         (Reference::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
-         (Reference::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
-         (Reference::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
-         (Reference::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
+        [(Key::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
+         (Key::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
+         (Key::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
+         (Key::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
+         (Key::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
     }
 
