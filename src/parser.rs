@@ -152,7 +152,7 @@ macro_rules! ascii {
 }
 
 // 7.2.2
-pub fn is_whitespace(data: u8) -> bool {
+fn is_whitespace(data: u8) -> bool {
     match data {
         ASCII_NUL
         | ASCII_HORIZONTAL_TAB
@@ -165,42 +165,34 @@ pub fn is_whitespace(data: u8) -> bool {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Res<'a, T> {
+enum Res<'a, T> {
     Found(Found<'a, T>),
     NotFound,
     Error,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Found<'a, T> {
+struct Found<'a, T> {
     data: T,
     remaining: &'a [u8],
 }
 
 impl <'a, T> Res<'a, T> {
-    pub fn found(data: T, remaining: &[u8]) -> Res<T> {
+    fn found(data: T, remaining: &[u8]) -> Res<T> {
         Res::Found(Found {
             data: data,
             remaining: remaining,
         })
     }
 
-    pub fn is_found(&self) -> bool {
+    fn is_found(&self) -> bool {
         match self {
             Res::Found(_) => true,
             _ => false,
         }
     }
 
-    pub fn unwrap(self) -> Found<'a, T> {
-        if let Res::Found(result) = self {
-            return result;
-        }
-
-        panic!("This is not a Res::Found");
-    }
-
-    pub fn map<U, F> (self, mapper: F) -> Res<'a, U>
+    fn map<U, F> (self, mapper: F) -> Res<'a, U>
     where F: FnOnce(T) -> Option<U> {
         match self {
             Res::Found(Found{ data, remaining }) =>
@@ -213,21 +205,21 @@ impl <'a, T> Res<'a, T> {
 }
 
 impl <'a> Res<'a, i64> {
-    pub fn i64(data: &[u8], remaining: &'a [u8]) -> Res<'a, i64> {
+    fn i64(data: &[u8], remaining: &'a [u8]) -> Res<'a, i64> {
         Res::string(data.to_vec(), remaining)
             .map(|s| i64::from_str(&s).ok())
     }
 }
 
 impl <'a> Res<'a, f64> {
-    pub fn f64(data: &[u8], remaining: &'a [u8]) -> Res<'a, f64> {
+    fn f64(data: &[u8], remaining: &'a [u8]) -> Res<'a, f64> {
         Res::string(data.to_vec(), remaining)
             .map(|s| f64::from_str(&s).ok())
     }
 }
 
 impl <'a> Res<'a, String> {
-    pub fn string(data: Vec<u8>, remaining: &'a [u8]) -> Res<'a, String> {
+    fn string(data: Vec<u8>, remaining: &'a [u8]) -> Res<'a, String> {
         String::from_utf8(data)
             .map(|s| Res::found(s, remaining))
             .unwrap_or(Res::found("ERROR: Unparsable string.".to_string(), remaining))
@@ -251,7 +243,7 @@ fn eol<'a>(data: &'a [u8]) -> Res<'a, ()> {
     }
 }
 
-pub fn until_eol<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
+fn until_eol<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
     let mut result = vec![];
 
     while data.len() > 0 {
@@ -274,20 +266,20 @@ pub fn until_eol<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
 }
 
 // 7.2.3
-pub fn comment<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
+fn comment<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
     ascii!(data, ASCII_PERCENT_SIGN);
 
     let comment = block!(data, until_eol);
     Res::found(comment, data)
 }
 
-pub fn string_comment<'a>(mut data: &'a [u8]) -> Res<'a, String> {
+fn string_comment<'a>(mut data: &'a [u8]) -> Res<'a, String> {
     let comment = block!(data, comment);
     Res::string(comment, data)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Version {
+enum Version {
     V1,
     V1_1,
     V1_2,
@@ -301,7 +293,7 @@ pub enum Version {
 }
 
 impl Version {
-    pub fn newer(version: &str) -> Version {
+    fn newer(version: &str) -> Version {
         // TODO: maybe match on "PDF-1.X" and remove
         // the extra part?
         Version::Newer(version.to_string())
@@ -309,7 +301,7 @@ impl Version {
 }
 
 // 7.5.2
-pub fn version<'a>(mut data: &'a [u8]) -> Res<'a, Version> {
+fn version<'a>(mut data: &'a [u8]) -> Res<'a, Version> {
     let version_comment = block!(data, string_comment);
     if !version_comment.starts_with("PDF-1") {
         return Res::NotFound;
@@ -332,7 +324,7 @@ pub fn version<'a>(mut data: &'a [u8]) -> Res<'a, Version> {
 }
 
 // 7.5.5
-pub fn eof<'a>(mut data: &'a [u8]) -> Res<'a, ()> {
+fn eof<'a>(mut data: &'a [u8]) -> Res<'a, ()> {
     let eof_comment = block!(data, string_comment);
     if eof_comment != "%EOF" {
         return Res::NotFound;
@@ -357,7 +349,7 @@ fn exact<'a>(data: &'a [u8], expected: &str) -> Res<'a, ()> {
 }
 
 // 7.3.2
-pub fn boolean<'a>(data: &'a [u8]) -> Res<'a, bool> {
+fn boolean<'a>(data: &'a [u8]) -> Res<'a, bool> {
     let is_true = exact(data, "true");
     if let Res::Found(result) = is_true {
         return Res::found(true, result.remaining);
@@ -384,7 +376,7 @@ fn is_float_ascii(data: u8) -> bool {
 }
 
 // 7.3.3
-pub fn integer<'a>(data: &'a [u8]) -> Res<'a, i64> {
+fn integer<'a>(data: &'a [u8]) -> Res<'a, i64> {
     requires!(data, is_float_ascii);
 
     let mut i = 0;
@@ -395,7 +387,7 @@ pub fn integer<'a>(data: &'a [u8]) -> Res<'a, i64> {
     Res::i64(&data[0..i], &data[i..])
 }
 
-pub fn nonnegative_integer<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
+fn nonnegative_integer<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
     let result = block!(data, integer);
     if result < 0 {
         return Res::NotFound;
@@ -405,7 +397,7 @@ pub fn nonnegative_integer<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
 }
 
 // 7.3.3
-pub fn float<'a>(data: &'a [u8]) -> Res<'a, f64> {
+fn float<'a>(data: &'a [u8]) -> Res<'a, f64> {
     requires!(data, is_float_ascii);
 
     let mut i = 0;
@@ -645,7 +637,7 @@ fn ascii_array_to_hex<'a>(data: &'a [u8]) -> Res<'a, u8> {
 }
 
 // 7.3.4
-pub fn string<'a>(data: &'a [u8]) -> Res<'a, String> {
+fn string<'a>(data: &'a [u8]) -> Res<'a, String> {
     let r = hex_string(data);
     if r.is_found() {
         return r;
@@ -666,13 +658,13 @@ fn identifier_escape<'a>(mut data: &'a [u8]) -> Res<'a, u8> {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct Key {
+pub struct Key {
     object: u64,
     generation: u64,
 }
 
 impl Key {
-    pub fn new(object: u64, generation: u64) -> Key {
+    fn new(object: u64, generation: u64) -> Key {
         Key {
             object,
             generation,
@@ -687,7 +679,7 @@ struct Definition {
 }
 
 impl Definition {
-    pub fn new(key: Key, object: PdfObject) -> Definition {
+    fn new(key: Key, object: PdfObject) -> Definition {
         Definition {
             key,
             object,
@@ -696,12 +688,12 @@ impl Definition {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Stream {
+pub struct Stream {
     data: Vec<u8>,
 }
 
 impl Stream {
-    pub fn new(data: &[u8]) -> Stream {
+    fn new(data: &[u8]) -> Stream {
         Stream {
             data: data.to_vec(),
         }
@@ -716,7 +708,7 @@ struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    pub fn from(mut dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
+    fn from(mut dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
         match dictionary.remove("Length") {
             Some(PdfObject::Integer(length)) => if length >= 0 {
                 Ok(StreamMetadata { length: length as usize })
@@ -729,7 +721,7 @@ impl StreamMetadata {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum PdfObject {
+pub enum PdfObject {
     Array(Vec<PdfObject>),
     Boolean(bool),
     Reference(Key),
@@ -740,20 +732,6 @@ enum PdfObject {
     Stream(Stream),
     Null,
     String(String),
-}
-
-impl PdfObject {
-    fn identifier(data: &str) -> PdfObject {
-        PdfObject::Identifier(data.to_string())
-    }
-
-    fn string(data: &str) -> PdfObject {
-        PdfObject::String(data.to_string())
-    }
-
-    fn reference(object: u64, generation: u64) -> PdfObject {
-        PdfObject::Reference(Key::new(object, generation))
-    }
 }
 
 // 7.3.5
@@ -985,17 +963,6 @@ struct XrefEntry {
     type_: XrefType,
 }
 
-impl XrefEntry {
-    pub fn new(offset: usize, generation_number: u64,
-               type_: XrefType) -> XrefEntry {
-        XrefEntry {
-            offset,
-            generation_number,
-            type_,
-        }
-    }
-}
-
 fn fixed_integer<'a>(data: &'a [u8], length: usize) -> Res<'a, u64> {
     if data.len() < length {
         return Res::NotFound;
@@ -1044,25 +1011,13 @@ struct Xref {
 }
 
 impl Xref {
-    pub fn from(entry: XrefEntry, object_number: u64) -> Xref {
+    fn from(entry: XrefEntry, object_number: u64) -> Xref {
         Xref {
             offset: entry.offset,
             type_: entry.type_,
             key: Key {
                 object: object_number,
                 generation: entry.generation_number,
-            },
-        }
-    }
-
-    pub fn new(offset: usize, object_number: u64, generation_number: u64,
-            type_: XrefType) -> Xref {
-        Xref {
-            offset,
-            type_,
-            key: Key {
-                object: object_number,
-                generation: generation_number,
             },
         }
     }
@@ -1118,7 +1073,15 @@ pub struct Pdf {
     startxref: u64,
 }
 
+impl Pdf {
+    pub fn resolve<'a>(&'a self, key: &Key) -> &'a PdfObject {
+        self.objects.get(key)
+            .unwrap_or(&PdfObject::Null)
+    }
+}
+
 // 7.5
+#[allow(unused_assignments)]
 fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
     let original_data = data;
 
@@ -1260,6 +1223,55 @@ mod test {
                 let result = $subject(data.as_bytes()).unwrap();
                 assert_eq!($map(&result), expected);
                 assert_eq!(from_bytes(result.remaining).as_str(), remaining);
+            }
+        }
+    }
+
+    impl XrefEntry {
+        fn new(offset: usize, generation_number: u64,
+                   type_: XrefType) -> XrefEntry {
+            XrefEntry {
+                offset,
+                generation_number,
+                type_,
+            }
+        }
+    }
+
+    impl PdfObject {
+        fn identifier(data: &str) -> PdfObject {
+            PdfObject::Identifier(data.to_string())
+        }
+
+        fn string(data: &str) -> PdfObject {
+            PdfObject::String(data.to_string())
+        }
+
+        fn reference(object: u64, generation: u64) -> PdfObject {
+            PdfObject::Reference(Key::new(object, generation))
+        }
+    }
+
+    impl <'a, T> Res<'a, T> {
+        fn unwrap(self) -> Found<'a, T> {
+            if let Res::Found(result) = self {
+                return result;
+            }
+
+            panic!("This is not a Res::Found");
+        }
+    }
+
+    impl Xref {
+        fn new(offset: usize, object_number: u64, generation_number: u64,
+                type_: XrefType) -> Xref {
+            Xref {
+                offset,
+                type_,
+                key: Key {
+                    object: object_number,
+                    generation: generation_number,
+                },
             }
         }
     }
