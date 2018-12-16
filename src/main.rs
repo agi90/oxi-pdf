@@ -10,10 +10,8 @@ fn main() -> std::io::Result<()> {
     let mut contents = vec![];
     file.read_to_end(&mut contents)?;
 
-    let pdf = parse_pdf(&contents[..]);
-    if pdf.is_ok() {
-        Ok(())
-    } else {
-        panic!("Could not parse pdf");
-    }
+    let pdf = parse_pdf(&contents[..]).unwrap();
+    println!("{:?}", pdf);
+
+    Ok(())
 }

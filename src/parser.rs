@@ -48,6 +48,22 @@ const ASCII_TILDE: u8                = 0x7E;
 
 type PdfDictionary = HashMap<String, PdfObject>;
 
+fn resolve_dictionary<F>(dictionary: PdfDictionary, resolve: &mut F) -> PdfDictionary
+where F: FnMut(&Reference) -> PdfObject {
+    let mut result = HashMap::new();
+
+    for (key, object) in dictionary {
+        match object {
+            PdfObject::Reference(r) => {
+                result.insert(key, resolve(&r).clone());
+            },
+            x => { result.insert(key, x); },
+        }
+    }
+
+    result
+}
+
 macro_rules! block {
     ($data: ident, $f: ident) => {
         {
@@ -230,8 +246,7 @@ fn eol<'a>(data: &'a [u8]) -> Res<'a, ()> {
                 Res::found((), &data[2..])
             } else {
                 Res::NotFound
-            }
-        ,
+            },
         _ => Res::NotFound,
     }
 }
@@ -650,7 +665,7 @@ fn identifier_escape<'a>(mut data: &'a [u8]) -> Res<'a, u8> {
     return ascii_array_to_hex(data);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct Reference {
     object: u64,
     generation: u64,
@@ -667,15 +682,15 @@ impl Reference {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Definition {
-    reference: Reference,
+    key: Reference,
     object: PdfObject,
 }
 
 impl Definition {
-    pub fn new(reference: Reference, object: PdfObject) -> Definition {
+    pub fn new(key: Reference, object: PdfObject) -> Definition {
         Definition {
-            reference: reference,
-            object: object,
+            key,
+            object,
         }
     }
 }
@@ -694,19 +709,21 @@ impl Stream {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
 struct StreamMetadata {
-    length: PdfObject,
+    length: usize,
     // TODO: the rest of the fields
 }
 
 impl StreamMetadata {
     pub fn from(mut dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
-        if let Some(length) = dictionary.remove("Length") {
-            Ok(StreamMetadata {
-                length: length,
-            })
-        } else {
-            Err("Missing Length".to_string())
+        match dictionary.remove("Length") {
+            Some(PdfObject::Integer(length)) => if length >= 0 {
+                Ok(StreamMetadata { length: length as usize })
+            } else {
+                Err("Negative length".to_string())
+            },
+            _ => Err("Missing length".to_string()),
         }
     }
 }
@@ -806,12 +823,32 @@ fn definition<'a>(mut data: &'a [u8]) -> Res<'a, Definition> {
     Res::found(Definition::new(reference, obj), data)
 }
 
-// 7.3.8.1
-fn stream<'a>(mut data: &'a [u8]) -> Res<'a, Stream> {
-    let dict = block!(data, dictionary);
+fn stream_definition<'a, F>(mut data: &'a [u8],
+                            resolve: &mut F) -> Res<'a, Definition>
+where F: FnMut(&Reference) -> PdfObject {
+    let reference = block!(data, reference_header);
+    data = consume_whitespace(data);
 
-    if let Ok(_) = StreamMetadata::from(dict) {
-        // TODO: use it
+    exact!(data, "obj");
+    data = consume_whitespace(data);
+
+    let stream = block!(data, stream, resolve);
+    data = consume_whitespace(data);
+
+    exact!(data, "endobj");
+
+    Res::found(Definition::new(reference,
+        PdfObject::Stream(stream)), data)
+}
+
+// 7.3.8.1
+fn stream<'a, F>(mut data: &'a [u8], resolve: &mut F) -> Res<'a, Stream>
+where F: FnMut(&Reference) -> PdfObject {
+    let dict = resolve_dictionary(block!(data, dictionary), resolve);
+
+    let metadata;
+    if let Ok(d) = StreamMetadata::from(dict) {
+        metadata = d;
     } else {
         return Res::NotFound;
     }
@@ -821,30 +858,12 @@ fn stream<'a>(mut data: &'a [u8]) -> Res<'a, Stream> {
     exact!(data, "stream");
     block!(data, eol);
 
-    let mut length = 0;
-    // TODO: profile and optimize this
-    while data.len() > length {
-        let mut local_data = &data[length..];
-
-        // A stream is delimited by (optionally) a newline and
-        // the string `endstream`
-        match eol(local_data) {
-            Res::Found(r) => {
-                local_data = r.remaining;
-            },
-            _ => {}
-        }
-
-        if exact(local_data, "endstream") != Res::NotFound {
-            break;
-        }
-
-        length += 1;
-        continue;
+    if data.len() < metadata.length {
+        return Res::Error;
     }
 
-    let result = Stream::new(&data[0..length]);
-    data = &data[length..];
+    let result = Stream::new(&data[0..metadata.length]);
+    data = &data[metadata.length..];
 
     optional!(data, eol);
     exact!(data, "endstream");
@@ -876,9 +895,6 @@ fn object<'a>(data: &'a [u8]) -> Res<'a, PdfObject> {
     }
     if let Res::Found(r) = array(data) {
         return Res::found(PdfObject::Array(r.data), r.remaining);
-    }
-    if let Res::Found(r) = stream(data) {
-        return Res::found(PdfObject::Stream(r.data), r.remaining);
     }
     if let Res::Found(r) = dictionary(data) {
         return Res::found(PdfObject::Dictionary(r.data), r.remaining);
@@ -934,7 +950,7 @@ fn null<'a>(data: &'a [u8]) -> Res<'a, ()> {
 }
 
 // 7.3.7
-fn dictionary<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
+fn dictionary<'a> (mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
     ascii!(data, ASCII_LESS_THAN_SIGN);
     ascii!(data, ASCII_LESS_THAN_SIGN);
     data = consume_whitespace(data);
@@ -1020,23 +1036,11 @@ fn xref_entry<'a>(mut data: &'a [u8]) -> Res<'a, XrefEntry> {
     return Res::found(XrefEntry { offset, generation_number, type_ }, data);
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-struct XrefKey {
-    object_number: u64,
-    generation_number: u64,
-}
-
-impl XrefKey {
-    pub fn new(object_number: u64, generation_number: u64) -> XrefKey {
-        XrefKey { object_number, generation_number }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Xref {
     offset: usize,
     type_: XrefType,
-    key: XrefKey,
+    key: Reference,
 }
 
 impl Xref {
@@ -1044,9 +1048,9 @@ impl Xref {
         Xref {
             offset: entry.offset,
             type_: entry.type_,
-            key: XrefKey {
-                object_number,
-                generation_number: entry.generation_number,
+            key: Reference {
+                object: object_number,
+                generation: entry.generation_number,
             },
         }
     }
@@ -1056,16 +1060,16 @@ impl Xref {
         Xref {
             offset,
             type_,
-            key: XrefKey {
-                object_number,
-                generation_number,
+            key: Reference {
+                object: object_number,
+                generation: generation_number,
             },
         }
     }
 }
 
 // 7.5.4
-fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<XrefKey, Xref>> {
+fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<Reference, Xref>> {
     exact!(data, "xref");
     data = consume_whitespace(data);
 
@@ -1108,37 +1112,118 @@ fn trailer<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
 #[derive(Debug)]
 pub struct Pdf {
     version: Version,
-    objects: Vec<Definition>,
-    xref_table: HashMap<XrefKey, Xref>,
+    objects: HashMap<Reference, PdfObject>,
+    xref_table: HashMap<Reference, Xref>,
     trailer: PdfDictionary,
     startxref: u64,
 }
 
+// 7.5
 fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
+    let original_data = data;
+
+    if data.len() < 1 {
+        return Res::NotFound;
+    }
+
+    // First, let's find the `startxref` reference at the end of the file.
+    let mut end = data.len() - 1;
+    let startxref_obj = loop {
+        if end == 0 {
+            // We got to the beginning and didn't find a startxref, this is not
+            // a valid PDF
+            return Res::NotFound;
+        }
+
+        if let Res::Found(xref) = startxref(&data[end..]) {
+            break xref;
+        } else {
+            end -= 1;
+            continue;
+        }
+    };
+
+    let mut remaining = startxref_obj.remaining;
+
+    // Let's make sure that the end of file is valid
+    block!(remaining, eol);
+    block!(remaining, eof);
+
+    // We should be at the end of the file now
+    if remaining != &[] {
+        return Res::NotFound;
+    }
+
+    let startxref_index = startxref_obj.data as usize;
+
+    if data.len() < startxref_index {
+        // startxref is not a valid index
+        return Res::Error;
+    }
+
+    let mut xref_data = &data[startxref_index..];
+    let xref = block!(xref_data, xref_table);
+
+    let trailer = block!(xref_data, trailer);
+    xref_data = consume_whitespace(xref_data);
+    
+    // We should be back at startxref now
+    block!(xref_data, startxref);
+
     let version = block!(data, version);
     data = consume_whitespace(data);
 
-    let mut objects = vec![];
-    loop {
-        let object = repeat!(data, definition);
-        objects.push(object);
+    let mut objects = HashMap::new();
 
+    loop {
+        let result;
+        if let Res::Found(r) = stream_definition(data, &mut |k| {
+            resolve(k, &xref, &mut objects, original_data).clone()
+        }) {
+            data = r.remaining;
+            result = r.data;
+        } else {
+            result = repeat!(data, definition);
+        }
+
+        objects.insert(result.key, result.object);
         data = consume_whitespace(data);
     }
 
-    let xref_table = block!(data, xref_table);
-    data = consume_whitespace(data);
+    // After all the definitions we should be back at the xref table
+    exact!(data, "xref");
 
-    let trailer = block!(data, trailer);
-    data = consume_whitespace(data);
+    Res::found(Pdf {
+        version,
+        trailer: resolve_dictionary(trailer, &mut |k| {
+            resolve(k, &xref, &mut objects, original_data).clone()
+        }),
+        objects,
+        xref_table: xref,
+        startxref: startxref_index as u64
+    }, &[])
+}
 
-    let startxref = block!(data, startxref);
+fn resolve<'a>(key: &Reference, xref: &HashMap<Reference, Xref>,
+           objects: &'a mut HashMap<Reference, PdfObject>,
+           data: &[u8]) -> &'a PdfObject {
+    if objects.contains_key(key) {
+        return objects.get(key).unwrap();
+    }
 
-    block!(data, eol);
-    block!(data, eof);
+    let offset = xref[key].offset;
+    let resolved_data = &data[offset..];
 
-    let result = Pdf { version, objects, xref_table, trailer, startxref };
-    Res::found(result, data)
+    match definition(resolved_data) {
+        Res::Found(x) => {
+            if x.data.key != *key {
+                panic!("Expected {:?} but found {:?}", key, x.data.key);
+            }
+            objects.insert(x.data.key, x.data.object);
+            objects.get(key).unwrap()
+        }
+        Res::NotFound | Res::Error => &PdfObject::Null,
+    }
 }
 
 pub fn parse_pdf(data: &[u8]) -> Result<Pdf, String> {
@@ -1410,20 +1495,6 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                     ("A".to_string(), PdfObject::identifier("B")),
                     ("C".to_string(), PdfObject::Array(vec![])),
                 ].iter().cloned().collect()), "");
-        object_test("<< /Length 8 0 R >>
-            stream\n\
-            BT \n\
-            	/F1 12 Tf \n\
-            	72 712 Td \n\
-            	(A stream with an indirect length) Tj \n\
-            ET\n\
-            \nendstream",
-            PdfObject::Stream(Stream::new(
-            "BT \n\
-            	/F1 12 Tf \n\
-            	72 712 Td \n\
-            	(A stream with an indirect length) Tj \n\
-            ET\n".as_bytes())), "");
     }
 
     test!(array_test, array, Vec<PdfObject>);
@@ -1515,8 +1586,9 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 PdfObject::string("Brilling")), "");
     }
 
-    fn stream_test(data: &str, expected: &str, remaining: &str) {
-        let result = stream(data.as_bytes()).unwrap();
+    fn stream_test(data: &str, expected: &str, remaining: &str, objects: HashMap<Reference, PdfObject>) {
+        let result = stream(data.as_bytes(), &mut |key|
+            objects.get(key).unwrap_or(&PdfObject::Null).clone()).unwrap();
         assert_eq!(from_bytes(&result.data.data[..]).as_str(), expected);
         assert_eq!(from_bytes(result.remaining).as_str(), remaining);
     }
@@ -1526,14 +1598,16 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
         stream_test("<< /Length 12 >> \
             stream\n\
                 123456789012\n\
-            endstream", "123456789012", "");
+            endstream", "123456789012", "", HashMap::new());
         stream_test("<< /Length 12 >> \
             stream\n\
-                123456789012endstream", "123456789012", "");
+                123456789012endstream", "123456789012", "", HashMap::new());
         stream_test("<< /Length 8 0 R >> % Reference length\n\
             stream\n\
                 123456789012\n\
-            endstream", "123456789012", "");
+            endstream", "123456789012", "",
+            [(Reference::new(8, 0), PdfObject::Integer(12))]
+                .iter().cloned().collect());
     }
 
     test!(version_test, version, Version);
@@ -1583,7 +1657,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 XrefEntry::new(3, 0, XrefType::InUse), "");
     }
 
-    test!(xref_table_test, xref_table, HashMap<XrefKey, Xref>);
+    test!(xref_table_test, xref_table, HashMap<Reference, Xref>);
 
     #[test]
     fn test_xref_table() {
@@ -1596,12 +1670,12 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000000000 00007 f\r\n\
             0000000331 00000 n\r\n\
             0000000409 00000 n\r\n",
-        [(XrefKey::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
-         (XrefKey::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
-         (XrefKey::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
-         (XrefKey::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
-         (XrefKey::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
-         (XrefKey::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
+        [(Reference::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
+         (Reference::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
+         (Reference::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
+         (Reference::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
+         (Reference::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
+         (Reference::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
         xref_table_test("xref\n\
             0 1\n\
@@ -1613,11 +1687,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000025635 00000 n\r\n\
             30 1\n\
             0000025777 00000 n\r\n",
-        [(XrefKey::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
-         (XrefKey::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
-         (XrefKey::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
-         (XrefKey::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
-         (XrefKey::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
+        [(Reference::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
+         (Reference::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
+         (Reference::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
+         (Reference::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
+         (Reference::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
     }
 
