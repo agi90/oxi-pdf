@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/agi90/oxi-pdf.svg?branch=master)](https://travis-ci.org/agi90/oxi-pdf)
+
 This project is experimental and still in early stages of development and not
 intended for use.
 
