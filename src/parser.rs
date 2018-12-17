@@ -46,13 +46,11 @@ const ASCII_F_LOWERCASE: u8          = 0x66;
 const ASCII_N_LOWERCASE: u8          = 0x6E;
 const ASCII_TILDE: u8                = 0x7E;
 
-type PdfDictionary = HashMap<String, PdfObject>;
-
 fn resolve_dictionary<F>(dictionary: PdfDictionary, resolve: &mut F) -> PdfDictionary
 where F: FnMut(&Key) -> PdfObject {
     let mut result = HashMap::new();
 
-    for (key, object) in dictionary {
+    for (key, object) in dictionary.data {
         match object {
             PdfObject::Reference(r) => {
                 result.insert(key, resolve(&r).clone());
@@ -61,7 +59,7 @@ where F: FnMut(&Key) -> PdfObject {
         }
     }
 
-    result
+    PdfDictionary::new(result)
 }
 
 macro_rules! block {
@@ -708,9 +706,9 @@ struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    fn from(mut dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
-        match dictionary.remove("Length") {
-            Some(PdfObject::Integer(length)) => if length >= 0 {
+    fn from(dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
+        match dictionary.get_integer("Length") {
+            Some(length) => if length >= 0 {
                 Ok(StreamMetadata { length: length as usize })
             } else {
                 Err("Negative length".to_string())
@@ -725,7 +723,7 @@ pub enum PdfObject {
     Array(Vec<PdfObject>),
     Boolean(bool),
     Reference(Key),
-    Dictionary(HashMap<String, PdfObject>),
+    Dictionary(PdfDictionary),
     Float(f64),
     Identifier(String),
     Integer(i64),
@@ -927,6 +925,38 @@ fn null<'a>(data: &'a [u8]) -> Res<'a, ()> {
     exact(data, "null")
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfDictionary {
+    data: HashMap<String, PdfObject>,
+}
+
+impl PdfDictionary {
+    pub fn new(data: HashMap<String, PdfObject>) -> PdfDictionary {
+        PdfDictionary { data }
+    }
+
+    pub fn get_integer(&self, key: &str) -> Option<i64> {
+        match self.data.get(key) {
+            Some(PdfObject::Integer(x)) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn get_reference(&self, key: &str) -> Option<Key> {
+        match self.data.get(key) {
+            Some(PdfObject::Reference(x)) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn get_identifier(&self, key: &str) -> Option<&str> {
+        match self.data.get(key) {
+            Some(PdfObject::Identifier(x)) => Some(x),
+            _ => None,
+        }
+    }
+}
+
 // 7.3.7
 fn dictionary<'a> (mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
     ascii!(data, ASCII_LESS_THAN_SIGN);
@@ -947,7 +977,7 @@ fn dictionary<'a> (mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
     ascii!(data, ASCII_GREATER_THAN_SIGN);
     ascii!(data, ASCII_GREATER_THAN_SIGN);
 
-    Res::found(result, data)
+    Res::found(PdfDictionary::new(result), data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1068,15 +1098,24 @@ fn trailer<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
 pub struct Pdf {
     version: Version,
     objects: HashMap<Key, PdfObject>,
-    xref_table: HashMap<Key, Xref>,
     trailer: PdfDictionary,
-    startxref: u64,
 }
 
 impl Pdf {
     pub fn resolve<'a>(&'a self, key: &Key) -> &'a PdfObject {
-        self.objects.get(key)
-            .unwrap_or(&PdfObject::Null)
+        self.objects.get(key).unwrap_or(&PdfObject::Null)
+    }
+
+    pub fn resolve_dictionary<'a>(&'a self, key: &Key)
+            -> Option<&'a PdfDictionary> {
+        match self.resolve(key) {
+            PdfObject::Dictionary(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn objects<'a>(&'a self) -> &'a HashMap<Key, PdfObject> {
+        &self.objects
     }
 }
 
@@ -1162,8 +1201,6 @@ fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
             resolve(k, &xref, &mut objects, original_data).clone()
         }),
         objects,
-        xref_table: xref,
-        startxref: startxref_index as u64
     }, &[])
 }
 
@@ -1502,11 +1539,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 PdfObject::string("Ralph"),
                 PdfObject::identifier("SomeName")]), "");
         object_test("<</A /B/C[]>>",
-            PdfObject::Dictionary(
+            PdfObject::Dictionary(PdfDictionary::new(
                 [
                     ("A".to_string(), PdfObject::identifier("B")),
                     ("C".to_string(), PdfObject::Array(vec![])),
-                ].iter().cloned().collect()), "");
+                ].iter().cloned().collect())), "");
     }
 
     test!(array_test, array, Vec<PdfObject>);
@@ -1531,8 +1568,8 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
     fn dictionary_test(data: &str, expected: &[(String, PdfObject)],
                        remaining: &str) {
         let result = dictionary(data.as_bytes()).unwrap();
-        let expected_map: PdfDictionary =
-            expected.iter().cloned().collect();
+        let expected_map =
+            PdfDictionary::new(expected.iter().cloned().collect());
         assert_eq!(result.data, expected_map);
         assert_eq!(from_bytes(result.remaining).as_str(), remaining);
     }
@@ -1563,12 +1600,12 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             ("IntegerItem".to_string(), PdfObject::Integer(12)),
             ("StringItem".to_string(), PdfObject::string("a string")),
             ("ReferenceItem".to_string(), PdfObject::reference(12, 0)),
-            ("Subdictionary".to_string(), PdfObject::Dictionary(
+            ("Subdictionary".to_string(), PdfObject::Dictionary(PdfDictionary::new(
                 [("Item1".to_string(), PdfObject::Float(0.4)),
                  ("Item2".to_string(), PdfObject::Boolean(true)),
                  ("LastItem".to_string(), PdfObject::string("not!")),
                  ("VeryLastItem".to_string(), PdfObject::string("OK"))
-                ].iter().cloned().collect()))
+                ].iter().cloned().collect())))
         ], "");
     }
 
@@ -1733,10 +1770,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 trailer\n\
                 << /Size 95 /Root 1 0 R /Info 2 0 R\n\
                 >>",
+                    PdfDictionary::new(
                     [("Root".to_string(), PdfObject::reference(1, 0)),
                      ("Size".to_string(), PdfObject::Integer(95)),
                      ("Info".to_string(), PdfObject::reference(2, 0))]
-                        .iter().cloned().collect()
+                        .iter().cloned().collect())
                 , "");
     }
 }
