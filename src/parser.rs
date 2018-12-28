@@ -224,7 +224,7 @@ impl <'a> Res<'a, String> {
     }
 }
 
-fn eol<'a>(data: &'a [u8]) -> Res<'a, ()> {
+fn eol(data: &[u8]) -> Res<'_, ()> {
     if data.len() == 0 {
         return Res::NotFound;
     }
@@ -241,7 +241,7 @@ fn eol<'a>(data: &'a [u8]) -> Res<'a, ()> {
     }
 }
 
-fn until_eol<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
+fn until_eol(mut data: &[u8]) -> Res<'_, Vec<u8>> {
     let mut result = vec![];
 
     while data.len() > 0 {
@@ -264,14 +264,14 @@ fn until_eol<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
 }
 
 // 7.2.3
-fn comment<'a>(mut data: &'a [u8]) -> Res<'a, Vec<u8>> {
+fn comment(mut data: &[u8]) -> Res<'_, Vec<u8>> {
     ascii!(data, ASCII_PERCENT_SIGN);
 
     let comment = block!(data, until_eol);
     Res::found(comment, data)
 }
 
-fn string_comment<'a>(mut data: &'a [u8]) -> Res<'a, String> {
+fn string_comment(mut data: &[u8]) -> Res<'_, String> {
     let comment = block!(data, comment);
     Res::string(comment, data)
 }
@@ -299,7 +299,7 @@ impl Version {
 }
 
 // 7.5.2
-fn version<'a>(mut data: &'a [u8]) -> Res<'a, Version> {
+fn version(mut data: &[u8]) -> Res<'_, Version> {
     let version_comment = block!(data, string_comment);
     if !version_comment.starts_with("PDF-1") {
         return Res::NotFound;
@@ -322,7 +322,7 @@ fn version<'a>(mut data: &'a [u8]) -> Res<'a, Version> {
 }
 
 // 7.5.5
-fn eof<'a>(mut data: &'a [u8]) -> Res<'a, ()> {
+fn eof(mut data: &[u8]) -> Res<'_, ()> {
     let eof_comment = block!(data, string_comment);
     if eof_comment != "%EOF" {
         return Res::NotFound;
@@ -331,7 +331,7 @@ fn eof<'a>(mut data: &'a [u8]) -> Res<'a, ()> {
     Res::found((), data)
 }
 
-fn exact<'a>(data: &'a [u8], expected: &str) -> Res<'a, ()> {
+fn exact<'a>(data: &'a [u8], expected: &'a str) -> Res<'a, ()> {
     if data.len() < expected.len() {
         return Res::NotFound;
     }
@@ -347,7 +347,7 @@ fn exact<'a>(data: &'a [u8], expected: &str) -> Res<'a, ()> {
 }
 
 // 7.3.2
-fn boolean<'a>(data: &'a [u8]) -> Res<'a, bool> {
+fn boolean(data: &[u8]) -> Res<'_, bool> {
     let is_true = exact(data, "true");
     if let Res::Found(result) = is_true {
         return Res::found(true, result.remaining);
@@ -374,7 +374,7 @@ fn is_float_ascii(data: u8) -> bool {
 }
 
 // 7.3.3
-fn integer<'a>(data: &'a [u8]) -> Res<'a, i64> {
+fn integer(data: &[u8]) -> Res<'_, i64> {
     requires!(data, is_float_ascii);
 
     let mut i = 0;
@@ -385,7 +385,7 @@ fn integer<'a>(data: &'a [u8]) -> Res<'a, i64> {
     Res::i64(&data[0..i], &data[i..])
 }
 
-fn nonnegative_integer<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
+fn nonnegative_integer(mut data: &[u8]) -> Res<'_, u64> {
     let result = block!(data, integer);
     if result < 0 {
         return Res::NotFound;
@@ -395,7 +395,7 @@ fn nonnegative_integer<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
 }
 
 // 7.3.3
-fn float<'a>(data: &'a [u8]) -> Res<'a, f64> {
+fn float(data: &[u8]) -> Res<'_, f64> {
     requires!(data, is_float_ascii);
 
     let mut i = 0;
@@ -413,7 +413,7 @@ fn is_octal_digit(data: u8) -> bool {
     }
 }
 
-fn octal_char<'a>(data: &'a [u8]) -> Res<'a, u8> {
+fn octal_char(data: &[u8]) -> Res<'_, u8> {
     let mut i = 0;
 
     while i < 3 && data.len() > i && is_octal_digit(data[i]) {
@@ -440,7 +440,7 @@ fn octal_char<'a>(data: &'a [u8]) -> Res<'a, u8> {
 }
 
 // 7.3.4.2
-fn string_escape<'a>(data: &'a [u8]) -> Res<'a, u8> {
+fn string_escape(data: &[u8]) -> Res<'_, u8> {
     if data.len() < 2 || data[0] != ASCII_REVERSE_SOLIDUS {
         return Res::NotFound;
     }
@@ -471,7 +471,7 @@ fn string_escape<'a>(data: &'a [u8]) -> Res<'a, u8> {
 }
 
 // 7.3.4.2
-fn literal_string<'a>(mut data: &'a [u8]) -> Res<'a, String> {
+fn literal_string(mut data: &[u8]) -> Res<'_, String> {
     ascii!(data, ASCII_LEFT_PARENTHESIS);
 
     let mut result = vec![];
@@ -586,7 +586,7 @@ fn ascii_to_hex(data: u8) -> u8 {
 }
 
 // 7.3.4.3
-fn hex_string<'a>(mut data: &'a [u8]) -> Res<'a, String> {
+fn hex_string(mut data: &[u8]) -> Res<'_, String> {
     ascii!(data, ASCII_LESS_THAN_SIGN);
 
     let mut result = vec![];
@@ -617,7 +617,7 @@ fn hex_string<'a>(mut data: &'a [u8]) -> Res<'a, String> {
     Res::string(bytes, data)
 }
 
-fn ascii_array_to_hex<'a>(data: &'a [u8]) -> Res<'a, u8> {
+fn ascii_array_to_hex(data: &[u8]) -> Res<'_, u8> {
     for i in 0..cmp::min(2, data.len()) {
         if !is_hex_ascii(data[i]) {
             return Res::NotFound;
@@ -635,7 +635,7 @@ fn ascii_array_to_hex<'a>(data: &'a [u8]) -> Res<'a, u8> {
 }
 
 // 7.3.4
-fn string<'a>(data: &'a [u8]) -> Res<'a, String> {
+fn string(data: &[u8]) -> Res<'_, String> {
     let r = hex_string(data);
     if r.is_found() {
         return r;
@@ -644,7 +644,7 @@ fn string<'a>(data: &'a [u8]) -> Res<'a, String> {
     return literal_string(data);
 }
 
-fn identifier_escape<'a>(mut data: &'a [u8]) -> Res<'a, u8> {
+fn identifier_escape(mut data: &[u8]) -> Res<'_, u8> {
     ascii!(data, ASCII_NUMBER_SIGN);
 
     if data.len() < 2 {
@@ -733,7 +733,7 @@ pub enum PdfObject {
 }
 
 // 7.3.5
-fn identifier<'a>(mut data: &'a [u8]) -> Res<'a, String> {
+fn identifier(mut data: &[u8]) -> Res<'_, String> {
     ascii!(data, ASCII_SOLIDUS);
 
     let mut result = vec![];
@@ -759,7 +759,7 @@ fn identifier<'a>(mut data: &'a [u8]) -> Res<'a, String> {
     Res::string(result, data)
 }
 
-fn reference_header<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
+fn reference_header(mut data: &[u8]) -> Res<'_, Key> {
     let object = block!(data, integer);
     data = consume_whitespace(data);
 
@@ -773,7 +773,7 @@ fn reference_header<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
 }
 
 // 7.3.10
-fn reference<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
+fn reference(mut data: &[u8]) -> Res<'_, Key> {
     let reference = block!(data, reference_header);
 
     data = consume_whitespace(data);
@@ -784,7 +784,7 @@ fn reference<'a>(mut data: &'a [u8]) -> Res<'a, Key> {
 }
 
 // 7.3.10
-fn definition<'a>(mut data: &'a [u8]) -> Res<'a, Definition> {
+fn definition(mut data: &[u8]) -> Res<'_, Definition> {
     let reference = block!(data, reference_header);
     data = consume_whitespace(data);
 
@@ -847,7 +847,7 @@ where F: FnMut(&Key) -> PdfObject {
     Res::found(result, data)
 }
 
-fn object<'a>(data: &'a [u8]) -> Res<'a, PdfObject> {
+fn object(data: &[u8]) -> Res<'_, PdfObject> {
     if let Res::Found(r) = boolean(data) {
         return Res::found(PdfObject::Boolean(r.data), r.remaining);
     }
@@ -880,7 +880,7 @@ fn object<'a>(data: &'a [u8]) -> Res<'a, PdfObject> {
 }
 
 /// Consumes whitespace or comments, wether they are there or not
-fn consume_whitespace<'a>(mut data: &'a [u8]) -> &'a [u8] {
+fn consume_whitespace(mut data: &[u8]) -> &[u8] {
     while data.len() > 0 {
         if is_whitespace(data[0]) {
             data = &data[1..];
@@ -899,7 +899,7 @@ fn consume_whitespace<'a>(mut data: &'a [u8]) -> &'a [u8] {
 }
 
 // 7.3.6
-fn array<'a>(mut data: &'a [u8]) -> Res<'a, Vec<PdfObject>> {
+fn array(mut data: &[u8]) -> Res<'_, Vec<PdfObject>> {
     ascii!(data, ASCII_LEFT_SQUARE_BRACKET);
     data = consume_whitespace(data);
 
@@ -921,7 +921,7 @@ fn array<'a>(mut data: &'a [u8]) -> Res<'a, Vec<PdfObject>> {
 }
 
 // 7.3.9
-fn null<'a>(data: &'a [u8]) -> Res<'a, ()> {
+fn null(data: &[u8]) -> Res<'_, ()> {
     exact(data, "null")
 }
 
@@ -958,7 +958,7 @@ impl PdfDictionary {
 }
 
 // 7.3.7
-fn dictionary<'a> (mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
+fn dictionary(mut data: &[u8]) -> Res<'_, PdfDictionary> {
     ascii!(data, ASCII_LESS_THAN_SIGN);
     ascii!(data, ASCII_LESS_THAN_SIGN);
     data = consume_whitespace(data);
@@ -993,7 +993,7 @@ struct XrefEntry {
     type_: XrefType,
 }
 
-fn fixed_integer<'a>(data: &'a [u8], length: usize) -> Res<'a, u64> {
+fn fixed_integer(data: &[u8], length: usize) -> Res<'_, u64> {
     if data.len() < length {
         return Res::NotFound;
     }
@@ -1005,7 +1005,7 @@ fn fixed_integer<'a>(data: &'a [u8], length: usize) -> Res<'a, u64> {
 }
 
 // 7.5.4
-fn xref_entry<'a>(mut data: &'a [u8]) -> Res<'a, XrefEntry> {
+fn xref_entry(mut data: &[u8]) -> Res<'_, XrefEntry> {
     if data.len() < 20 {
         return Res::NotFound;
     }
@@ -1054,7 +1054,7 @@ impl Xref {
 }
 
 // 7.5.4
-fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<Key, Xref>> {
+fn xref_table(mut data: &[u8]) -> Res<'_, HashMap<Key, Xref>> {
     exact!(data, "xref");
     data = consume_whitespace(data);
 
@@ -1077,7 +1077,7 @@ fn xref_table<'a>(mut data: &'a [u8]) -> Res<'a, HashMap<Key, Xref>> {
 }
 
 // 7.5.5
-fn startxref<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
+fn startxref(mut data: &[u8]) -> Res<'_, u64> {
     exact!(data, "startxref");
     data = consume_whitespace(data);
 
@@ -1086,7 +1086,7 @@ fn startxref<'a>(mut data: &'a [u8]) -> Res<'a, u64> {
 }
 
 // 7.5.5
-fn trailer<'a>(mut data: &'a [u8]) -> Res<'a, PdfDictionary> {
+fn trailer(mut data: &[u8]) -> Res<'_, PdfDictionary> {
     exact!(data, "trailer");
     data = consume_whitespace(data);
 
@@ -1102,26 +1102,25 @@ pub struct Pdf {
 }
 
 impl Pdf {
-    pub fn resolve<'a>(&'a self, key: &Key) -> &'a PdfObject {
+    pub fn resolve(&self, key: &Key) -> &PdfObject {
         self.objects.get(key).unwrap_or(&PdfObject::Null)
     }
 
-    pub fn resolve_dictionary<'a>(&'a self, key: &Key)
-            -> Option<&'a PdfDictionary> {
+    pub fn resolve_dictionary(&self, key: &Key) -> Option<&PdfDictionary> {
         match self.resolve(key) {
             PdfObject::Dictionary(x) => Some(x),
             _ => None,
         }
     }
 
-    pub fn objects<'a>(&'a self) -> &'a HashMap<Key, PdfObject> {
+    pub fn objects(&self) -> &HashMap<Key, PdfObject> {
         &self.objects
     }
 }
 
 // 7.5
 #[allow(unused_assignments)]
-fn pdf<'a>(mut data: &'a [u8]) -> Res<'a, Pdf> {
+fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
     let original_data = data;
 
     if data.len() < 1 {
@@ -1675,13 +1674,13 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
         version_test("%PDF-1.9", Version::newer("PDF-1.9"), "");
     }
 
-    fn fixed_integer_5<'a>(data: &'a [u8]) -> Res<'a, u64> {
+    fn fixed_integer_5(data: &[u8]) -> Res<'_, u64> {
         fixed_integer(data, 5)
     }
 
     test!(fixed_integer_5_test, fixed_integer_5, u64);
 
-    fn fixed_integer_10<'a>(data: &'a [u8]) -> Res<'a, u64> {
+    fn fixed_integer_10(data: &[u8]) -> Res<'_, u64> {
         fixed_integer(data, 10)
     }
 
