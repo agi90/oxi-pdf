@@ -1,4 +1,5 @@
 use std::cmp;
+use std::str;
 use std::str::FromStr;
 use std::collections::HashMap;
 
@@ -471,7 +472,7 @@ fn string_escape(data: &[u8]) -> Res<'_, u8> {
 }
 
 // 7.3.4.2
-fn literal_string(mut data: &[u8]) -> Res<'_, String> {
+fn literal_string(mut data: &[u8]) -> Res<'_, Vec<u8>> {
     ascii!(data, ASCII_LEFT_PARENTHESIS);
 
     let mut result = vec![];
@@ -508,7 +509,7 @@ fn literal_string(mut data: &[u8]) -> Res<'_, String> {
         // Only balanced parentheses are allowed
         Res::Error
     } else {
-        Res::string(result, data)
+        Res::found(result, data)
     }
 }
 
@@ -586,7 +587,7 @@ fn ascii_to_hex(data: u8) -> u8 {
 }
 
 // 7.3.4.3
-fn hex_string(mut data: &[u8]) -> Res<'_, String> {
+fn hex_string(mut data: &[u8]) -> Res<'_, Vec<u8>> {
     ascii!(data, ASCII_LESS_THAN_SIGN);
 
     let mut result = vec![];
@@ -614,7 +615,7 @@ fn hex_string(mut data: &[u8]) -> Res<'_, String> {
         }
     }
 
-    Res::string(bytes, data)
+    Res::found(bytes, data)
 }
 
 fn ascii_array_to_hex(data: &[u8]) -> Res<'_, u8> {
@@ -635,7 +636,7 @@ fn ascii_array_to_hex(data: &[u8]) -> Res<'_, u8> {
 }
 
 // 7.3.4
-fn string(data: &[u8]) -> Res<'_, String> {
+fn string(data: &[u8]) -> Res<'_, Vec<u8>> {
     let r = hex_string(data);
     if r.is_found() {
         return r;
@@ -707,7 +708,7 @@ struct StreamMetadata {
 
 impl StreamMetadata {
     fn from(dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
-        match dictionary.get_integer("Length") {
+        match dictionary.integer("Length") {
             Some(length) => if length >= 0 {
                 Ok(StreamMetadata { length: length as usize })
             } else {
@@ -729,7 +730,178 @@ pub enum PdfObject {
     Integer(i64),
     Stream(Stream),
     Null,
-    String(String),
+    String(Vec<u8>),
+}
+
+pub trait OptionalFrom
+where Self: Sized {
+    fn from(obj: &PdfObject, pdf: &Pdf) -> Option<Self>;
+}
+
+#[macro_export]
+macro_rules! pdf_struct {
+    (optional, $name:ident, $type:ty, $data:expr, $pdf:expr, $key:expr) => {
+        let $name: Option<$type> = $data.get($key)
+            .and_then(|o| OptionalFrom::from(o, $pdf));
+    };
+    ($name:ident, $type:ty, $data:expr, $pdf:expr, $key:expr) => {
+        let $name: $type = OptionalFrom::from($data.get($key)?, $pdf)?;
+    };
+    {
+        $name:ident {
+            required: [
+                $($field_name:ident: $type:ty, $key:expr),*
+            ],
+            optional: [
+                $($opt_field_name:ident: $opt_type:ty, $opt_key:expr),*
+            ]
+        }
+    } => {
+        #[derive(Debug, Clone)]
+        pub struct $name {
+            $($field_name: $type,)*
+            $($opt_field_name: Option<$opt_type>,)*
+        }
+
+        impl OptionalFrom for $name {
+            fn from(obj: &PdfObject, pdf: &parser::Pdf) -> Option<$name> {
+                let data = obj.as_dictionary(pdf)?;
+                $(pdf_struct!($field_name, $type, data, pdf, $key);)*
+                $(pdf_struct!(optional, $opt_field_name, $opt_type, data, pdf,
+                              $opt_key);)*
+                Some($name {
+                    $($field_name,)*
+                    $($opt_field_name,)*
+                })
+            }
+        }
+    }
+}
+
+impl OptionalFrom for u64 {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        obj.as_unsigned()
+    }
+}
+
+impl OptionalFrom for i64 {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        obj.as_integer()
+    }
+}
+
+impl OptionalFrom for f64 {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        obj.as_float()
+    }
+}
+
+impl OptionalFrom for Vec<u64> {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        Some(obj.as_unsigned_array()?.collect())
+    }
+}
+
+impl OptionalFrom for Vec<i64> {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        Some(obj.as_integer_array()?.collect())
+    }
+}
+
+impl OptionalFrom for Vec<u8> {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        obj.as_string().map(|s| s.to_vec())
+    }
+}
+
+impl OptionalFrom for String {
+    fn from(obj: &PdfObject, _: &Pdf) -> Option<Self> {
+        obj.as_string()
+           .and_then(|b| str::from_utf8(b).ok())
+           .or_else(|| obj.as_identifier())
+           .map(str::to_string)
+    }
+}
+
+impl PdfObject {
+    pub fn as_array(&self) -> Option<&[PdfObject]> {
+        match self {
+            PdfObject::Array(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn as_unsigned_array(&self) -> Option<impl Iterator<Item = u64> + '_> {
+        Some(self.as_array()?.iter().filter_map(PdfObject::as_unsigned))
+    }
+
+    pub fn as_integer_array(&self) -> Option<impl Iterator<Item = i64> + '_> {
+        Some(self.as_array()?.iter().filter_map(PdfObject::as_integer))
+    }
+
+    pub fn as_float_array(&self) -> Option<impl Iterator<Item = f64> + '_> {
+        Some(self.as_array()?.iter().filter_map(PdfObject::as_float))
+    }
+
+    pub fn as_boolean(&self) -> Option<bool> {
+        match self {
+            PdfObject::Boolean(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn as_reference(&self) -> Option<&Key> {
+        match self {
+            PdfObject::Reference(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn as_dictionary<'a>(&'a self, pdf: &'a Pdf) -> Option<&'a PdfDictionary> {
+        match self {
+            PdfObject::Dictionary(x) => Some(x),
+            PdfObject::Reference(r) => pdf.resolve(&r).as_dictionary(pdf),
+            _ => None,
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            PdfObject::Float(x) => Some(*x),
+            PdfObject::Integer(x) => Some(*x as f64),
+            _ => None,
+        }
+    }
+
+    pub fn as_identifier(&self) -> Option<&str> {
+        match self {
+            PdfObject::Identifier(x) => Some(x.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            PdfObject::Integer(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn as_unsigned(&self) -> Option<u64> {
+        let x = self.as_integer()?;
+        if x <= 0 {
+            None
+        } else {
+            Some(x as u64)
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&[u8]> {
+        match self {
+            PdfObject::String(x) => Some(x.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 // 7.3.5
@@ -927,7 +1099,7 @@ fn null(data: &[u8]) -> Res<'_, ()> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfDictionary {
-    data: HashMap<String, PdfObject>,
+    pub data: HashMap<String, PdfObject>,
 }
 
 impl PdfDictionary {
@@ -935,25 +1107,71 @@ impl PdfDictionary {
         PdfDictionary { data }
     }
 
-    pub fn get_integer(&self, key: &str) -> Option<i64> {
-        match self.data.get(key) {
-            Some(PdfObject::Integer(x)) => Some(*x),
-            _ => None,
-        }
+    pub fn get(&self, key: &str) -> Option<&PdfObject> {
+        self.data.get(key)
     }
 
-    pub fn get_reference(&self, key: &str) -> Option<Key> {
-        match self.data.get(key) {
-            Some(PdfObject::Reference(x)) => Some(*x),
-            _ => None,
-        }
+    pub fn integer(&self, key: &str) -> Option<i64> {
+        self.data.get(key).and_then(PdfObject::as_integer)
     }
 
-    pub fn get_identifier(&self, key: &str) -> Option<&str> {
-        match self.data.get(key) {
-            Some(PdfObject::Identifier(x)) => Some(x),
-            _ => None,
+    pub fn unsigned(&self, key: &str) -> Option<u64> {
+        self.data.get(key).and_then(PdfObject::as_unsigned)
+    }
+
+    pub fn identifier(&self, key: &str) -> Option<&str> {
+        self.data.get(key).and_then(PdfObject::as_identifier)
+    }
+
+    pub fn float(&self, key: &str) -> Option<f64> {
+        self.data.get(key).and_then(PdfObject::as_float)
+    }
+
+    pub fn boolean(&self, key: &str) -> Option<bool> {
+        self.data.get(key).and_then(PdfObject::as_boolean)
+    }
+
+    pub fn array(&self, key: &str) -> Option<&[PdfObject]> {
+        self.data.get(key).and_then(PdfObject::as_array)
+    }
+
+    pub fn dictionary<'a>(&'a self, key: &str, pdf: &'a Pdf)
+            -> Option<&'a PdfDictionary> {
+        self.data.get(key).and_then(|obj| obj.as_dictionary(pdf))
+    }
+
+    pub fn reference_array(&self, key: &str)
+            -> Option<impl Iterator<Item = &Key>> {
+        Some(self.array(key)?.iter()
+            .filter_map(PdfObject::as_reference))
+    }
+
+    pub fn identifier_array(&self, key: &str)
+            -> Option<impl Iterator<Item = &str>> {
+        Some(self.array(key)?.iter()
+            .filter_map(PdfObject::as_identifier))
+    }
+
+    pub fn integer_array(&self, key: &str)
+            -> Option<impl Iterator<Item = i64> + '_> {
+        Some(self.array(key)?.iter()
+            .filter_map(PdfObject::as_integer))
+    }
+
+    /// Iterates through an array of references, resolves them and maps them to
+    /// an object of type T using `map`. Returns `None` if either the element
+    /// is not found or any of the references is not found.
+    pub fn map_reference_array<T, F>(&self, key: &str, pdf: &Pdf, map: F)
+            -> Option<Vec<T>>
+    where F: Fn(&PdfDictionary, &Pdf) -> Option<T>
+    {
+        let mut result = vec![];
+        for k in self.reference_array(key)? {
+            result.push(
+                map(pdf.resolve(&k).as_dictionary(pdf)?, pdf)?);
         }
+
+        return Some(result);
     }
 }
 
@@ -1106,13 +1324,6 @@ impl Pdf {
         self.objects.get(key).unwrap_or(&PdfObject::Null)
     }
 
-    pub fn resolve_dictionary(&self, key: &Key) -> Option<&PdfDictionary> {
-        match self.resolve(key) {
-            PdfObject::Dictionary(x) => Some(x),
-            _ => None,
-        }
-    }
-
     pub fn objects(&self) -> &HashMap<Key, PdfObject> {
         &self.objects
     }
@@ -1243,7 +1454,14 @@ mod test {
         ($name: ident, $subject: ident) => {
             fn $name(data: &str, expected: &str, remaining: &str) {
                 let result = $subject(data.as_bytes()).unwrap();
-                assert_eq!(result.data.as_str(), expected);
+                assert_eq!(str::from_utf8(&result.data).unwrap(), expected);
+                assert_eq!(from_bytes(result.remaining).as_str(), remaining);
+            }
+        };
+        ($name: ident, $subject: ident, String) => {
+            fn $name(data: &str, expected: &str, remaining: &str) {
+                let result = $subject(data.as_bytes()).unwrap();
+                assert_eq!(result.data.to_string(), expected);
                 assert_eq!(from_bytes(result.remaining).as_str(), remaining);
             }
         };
@@ -1280,7 +1498,7 @@ mod test {
         }
 
         fn string(data: &str) -> PdfObject {
-            PdfObject::String(data.to_string())
+            PdfObject::String(data.as_bytes().to_vec())
         }
 
         fn reference(object: u64, generation: u64) -> PdfObject {
@@ -1344,7 +1562,7 @@ mod test {
         until_eol_test("test", "test", "");
     }
 
-    test!(string_comment_test, string_comment);
+    test!(string_comment_test, string_comment, String);
 
     #[test]
     fn test_comment() {
@@ -1468,8 +1686,6 @@ mod test {
         hex_string_test("<F09F8E89>", "🎉", "");
         hex_string_test("<4E6F762073686D6F7A206B6120706F702E>",
                         "Nov shmoz ka pop.", "");
-        hex_string_test("<F240D629CD72348F>",
-                        "ERROR: Unparsable string.", "");
     }
 
     test!(string_test, string);
@@ -1492,7 +1708,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
         identifier_escape_test("#20", ' ', "");
     }
 
-    test!(identifier_test, identifier);
+    test!(identifier_test, identifier, String);
 
     #[test]
     fn test_identifier() {
