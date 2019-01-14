@@ -699,22 +699,70 @@ impl Stream {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Filter {
+    ASCIIHexDecode,
+    ASCII85Decode,
+    LZWDecode,
+    FlateDecode,
+    RunLengthDecode,
+    CCITTFaxDecode,
+    JBIG2Decode,
+    DCTDecode,
+    JPXDecode,
+    Crypt,
+}
+
+impl Filter {
+    fn from(obj: &PdfObject) -> Option<Filter> {
+        Some(match obj.as_identifier()? {
+            "ASCIIHexDecode" => Filter::ASCIIHexDecode,
+            "ASCII85Decode" => Filter::ASCII85Decode,
+            "LZWDecode" => Filter::LZWDecode,
+            "FlateDecode" => Filter::FlateDecode,
+            "RunLengthDecode" => Filter::RunLengthDecode,
+            "CCITTFaxDecode" => Filter::CCITTFaxDecode,
+            "JBIG2Decode" => Filter::JBIG2Decode,
+            "DCTDecode" => Filter::DCTDecode,
+            "JPXDecode" => Filter::JPXDecode,
+            "Crypt" => Filter::Crypt,
+            _ => return None,
+        })
+    }
+
+    fn from_vec(obj: &PdfObject) -> Option<Vec<Filter>> {
+        if obj.as_identifier().is_some() {
+            Some(vec![Filter::from(obj)?])
+        } else {
+            Some(obj.as_array()?.iter()
+                .filter_map(Filter::from)
+                .collect())
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 struct StreamMetadata {
     length: usize,
+    filter: Vec<Filter>,
     // TODO: the rest of the fields
 }
 
 impl StreamMetadata {
-    fn from(dictionary: PdfDictionary) -> Result<StreamMetadata, String> {
+    fn from(dictionary: PdfDictionary) -> Option<StreamMetadata> {
         match dictionary.integer("Length") {
             Some(length) => if length >= 0 {
-                Ok(StreamMetadata { length: length as usize })
+                Some(StreamMetadata {
+                    length: length as usize,
+                    filter: dictionary.get("Filter")
+                        .and_then(Filter::from_vec)
+                        .unwrap_or(vec![]),
+                })
             } else {
-                Err("Negative length".to_string())
+                None
             },
-            _ => Err("Missing length".to_string()),
+            _ => None,
         }
     }
 }
@@ -841,6 +889,10 @@ impl PdfObject {
 
     pub fn as_float_array(&self) -> Option<impl Iterator<Item = f64> + '_> {
         Some(self.as_array()?.iter().filter_map(PdfObject::as_float))
+    }
+
+    pub fn as_identifier_array(&self) -> Option<impl Iterator<Item = &str>> {
+        Some(self.as_array()?.iter().filter_map(PdfObject::as_identifier))
     }
 
     pub fn as_boolean(&self) -> Option<bool> {
@@ -995,7 +1047,7 @@ where F: FnMut(&Key) -> PdfObject {
     let dict = resolve_dictionary(block!(data, dictionary), resolve);
 
     let metadata;
-    if let Ok(d) = StreamMetadata::from(dict) {
+    if let Some(d) = StreamMetadata::from(dict) {
         metadata = d;
     } else {
         return Res::NotFound;
