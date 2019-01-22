@@ -1,7 +1,17 @@
-use std::cmp;
-use std::str;
-use std::str::FromStr;
-use std::collections::HashMap;
+use std::{
+    cmp,
+    collections::HashMap,
+    str,
+    str::FromStr,
+    io::{
+        Cursor,
+    },
+};
+
+use crate::deflate::{
+    BitReader,
+    rfc1950,
+};
 
 const ASCII_NUL: u8                  = 0x00;
 const ASCII_BACKSPACE: u8            = 0x08;
@@ -689,12 +699,14 @@ impl Definition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stream {
     data: Vec<u8>,
+    metadata: StreamMetadata,
 }
 
 impl Stream {
-    fn new(data: &[u8]) -> Stream {
+    fn new(data: &[u8], metadata: StreamMetadata) -> Stream {
         Stream {
             data: data.to_vec(),
+            metadata,
         }
     }
 }
@@ -745,7 +757,7 @@ impl Filter {
 #[derive(Debug, Clone, PartialEq)]
 struct StreamMetadata {
     length: usize,
-    filter: Vec<Filter>,
+    filters: Vec<Filter>,
     // TODO: the rest of the fields
 }
 
@@ -755,7 +767,7 @@ impl StreamMetadata {
             Some(length) => if length >= 0 {
                 Some(StreamMetadata {
                     length: length as usize,
-                    filter: dictionary.get("Filter")
+                    filters: dictionary.get("Filter")
                         .and_then(Filter::from_vec)
                         .unwrap_or(vec![]),
                 })
@@ -889,10 +901,6 @@ impl PdfObject {
 
     pub fn as_float_array(&self) -> Option<impl Iterator<Item = f64> + '_> {
         Some(self.as_array()?.iter().filter_map(PdfObject::as_float))
-    }
-
-    pub fn as_identifier_array(&self) -> Option<impl Iterator<Item = &str>> {
-        Some(self.as_array()?.iter().filter_map(PdfObject::as_identifier))
     }
 
     pub fn as_boolean(&self) -> Option<bool> {
@@ -1062,8 +1070,9 @@ where F: FnMut(&Key) -> PdfObject {
         return Res::Error;
     }
 
-    let result = Stream::new(&data[0..metadata.length]);
-    data = &data[metadata.length..];
+    let length = metadata.length;
+    let result = Stream::new(&data[0..length], metadata);
+    data = &data[length..];
 
     optional!(data, eol);
     exact!(data, "endstream");
@@ -1446,6 +1455,23 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
         }) {
             data = r.remaining;
             result = r.data;
+
+            if let PdfObject::Stream(ref s) = result.object {
+                if s.metadata.filters.contains(&Filter::FlateDecode) {
+                    let mut reader = BitReader::new(Box::new(Cursor::new(
+                            s.data.clone())));
+                    let decoded = rfc1950(&mut reader);
+                    if decoded.is_err() {
+                        for x in &s.data {
+                            print!("{:02X}", x);
+                        }
+                        println!("");
+                        println!("{:?}", decoded);
+
+                        panic!();
+                    }
+                }
+            }
         } else {
             result = repeat!(data, definition);
         }

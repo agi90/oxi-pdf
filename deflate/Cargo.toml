@@ -1,0 +1,7 @@
+[package]
+name = "deflate"
+version = "0.1.0"
+authors = ["Agi Sferro <agi.novanta@gmail.com>"]
+edition = "2018"
+
+[dependencies]

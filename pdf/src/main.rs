@@ -1,8 +1,12 @@
+// #![feature(const_fn)]
+
 #[macro_use]
 mod parser;
 mod resolver;
 mod types;
 mod font;
+
+extern crate deflate;
 
 use std::fs::File;
 use std::io::Read;

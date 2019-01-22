@@ -20,8 +20,7 @@ pub fn resolve_pdf(pdf: &parser::Pdf) -> Result<(), String> {
                 if type_ == "Catalog" {
                     Catalog::from(dictionary, pdf).ok_or("Missing Catalog.")?;
                 } else if type_ == "Font" {
-                    let font : Option<Font> = OptionalFrom::from(object, pdf);
-                    println!("{:#?}", font);
+                    let _font : Option<Font> = OptionalFrom::from(object, pdf);
                 }
             }
         }
