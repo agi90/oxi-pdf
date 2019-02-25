@@ -1460,8 +1460,9 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
                 if s.metadata.filters.contains(&Filter::FlateDecode) {
                     let mut reader = BitReader::new(Box::new(Cursor::new(
                             s.data.clone())));
-                    let decoded = rfc1950(&mut reader);
-                    if decoded.is_err() {
+                    let mut decoded = Cursor::new(vec![]);
+                    let len = rfc1950(&mut reader, &mut decoded);
+                    if len.is_err() {
                         for x in &s.data {
                             print!("{:02X}", x);
                         }

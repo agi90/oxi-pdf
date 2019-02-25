@@ -3,6 +3,7 @@
 
 use std::io;
 use std::io::{
+    Write,
     Error,
     ErrorKind,
     Read,
@@ -35,7 +36,7 @@ impl EncodingType {
     }
 }
 
-pub fn rfc1950(data: &mut BitReader) -> io::Result<Vec<u8>> {
+pub fn rfc1950(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
     let compression_method = data.read_number(4)?;
     let compression_info = data.read_number(4)?;
     let check_bits = data.read_number(5)?;
@@ -62,11 +63,17 @@ pub fn rfc1950(data: &mut BitReader) -> io::Result<Vec<u8>> {
         let _adler32 = data.read_number(32)?;
     }
 
-    rfc1951(data)
+    rfc1951(data, out)
 }
 
-pub fn rfc1951(data: &mut BitReader) -> io::Result<Vec<u8>> {
+// 3.2.5 - This is the maximum distance that each compressed block can
+// reference, note that distance lookbacks can cross block boundaries.
+const MAX_LOOKBACK: usize = 32768;
+
+pub fn rfc1951(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
     let mut decoded = vec![];
+    let mut length = 0;
+
     loop {
         let bfinal = data.read_bits(1)?;
         let btype = data.read_bits(2)?;
@@ -91,14 +98,24 @@ pub fn rfc1951(data: &mut BitReader) -> io::Result<Vec<u8>> {
             },
         }
 
+        if decoded.len() > MAX_LOOKBACK {
+            let new_decoded = decoded.split_off(decoded.len() - MAX_LOOKBACK);
+            length += decoded.len();
+            out.write(&decoded[..]);
+
+            decoded = new_decoded;
+        }
+
         if bfinal > 0 {
+            length += decoded.len();
+            out.write(&decoded[..]);
             break;
         }
     }
 
     // TODO: checksum
 
-    Ok(decoded)
+    Ok(length)
 }
 
 #[derive(Debug)]
@@ -456,6 +473,11 @@ fn read_huffman(mut data: HuffmanAdapter, out: &mut Vec<u8>) -> io::Result<()> {
                     return Ok(());
                 } else {
                     let (mut length, distance) = data.read_distance(x)?;
+                    if out.len() < distance {
+                        panic!("Buffer is not big enough. distance = {} buffer = {}", distance, out.len());
+                        // return Err(Error::new(ErrorKind::Other, "distance value invalid."));
+                    }
+
                     let start = out.len() - distance;
 
                     // If the buffer is not long enough, we will just repeat
@@ -520,8 +542,9 @@ mod test {
 
         let mut reader = BitReader::new(Box::new(Cursor::new(data)));
 
-        let data = rfc1951(&mut reader).unwrap();
-        assert_eq!(String::from_utf8(data).unwrap().as_str(),
+        let mut data = Cursor::new(vec![]);
+        rfc1951(&mut reader, &mut data).unwrap();
+        assert_eq!(String::from_utf8(data.into_inner()).unwrap().as_str(),
             "TestingTesting");
     }
 }

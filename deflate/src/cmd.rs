@@ -6,9 +6,12 @@ use crate::gzip::rfc1952;
 use crate::bit_reader::BitReader;
 
 use std::io;
-use std::io::{Write, Read};
+use std::io::{
+    Write,
+    Read,
+    BufReader
+};
 use std::fs::File;
-use std::io::BufReader;
 
 use std::env;
 
@@ -30,8 +33,7 @@ fn main() -> io::Result<()> {
 
     let mut reader = BitReader::new(source);
 
-    let result = rfc1952(&mut reader)?;
-    io::stdout().write(&result[..])?;
+    rfc1952(&mut reader, &mut io::stdout())?;
 
     Ok(())
 }

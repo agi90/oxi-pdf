@@ -6,6 +6,7 @@ use std::io::{
     Error,
     ErrorKind,
     Read,
+    Write,
 };
 
 use std::collections::HashSet;
@@ -85,7 +86,7 @@ impl Os {
 }
 
 // 2.3
-pub fn rfc1952(data: &mut BitReader) -> io::Result<Vec<u8>> {
+pub fn rfc1952(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
     if data.read_number(16)? != 0x8B1F {
         return Err(Error::new(ErrorKind::Other, "Missing gzip magic number"));
     }
@@ -125,7 +126,7 @@ pub fn rfc1952(data: &mut BitReader) -> io::Result<Vec<u8>> {
         unimplemented!();
     }
 
-    let decompressed = rfc1951(data)?;
+    let decompressed_size = rfc1951(data, out)?;
 
     data.read_remaining_byte()?;
 
@@ -133,11 +134,11 @@ pub fn rfc1952(data: &mut BitReader) -> io::Result<Vec<u8>> {
     let _crc32 = data.read_number(32)?;
     let size = data.read_number(32)?;
 
-    if decompressed.len() != size as usize {
+    if decompressed_size != size as usize {
         return Err(Error::new(ErrorKind::Other, "Input size does not match."));
     }
 
-    Ok(decompressed)
+    Ok(decompressed_size)
 }
 
 pub fn read_name(data: &mut BitReader) -> io::Result<String> {

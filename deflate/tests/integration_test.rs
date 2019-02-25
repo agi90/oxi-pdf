@@ -1,7 +1,10 @@
 extern crate deflate;
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{
+    Read,
+    Cursor,
+};
 
 use deflate::{
     BitReader,
@@ -12,11 +15,13 @@ use deflate::{
 fn test_rfc1952() {
     let file = File::open("tests/data.gz").unwrap();
     let mut reader = BitReader::new(Box::new(file));
-    let decompressed = rfc1952(&mut reader).unwrap();
+
+    let mut decompressed = Cursor::new(vec![]);
+    rfc1952(&mut reader, &mut decompressed).unwrap();
 
     let mut expected_file = File::open("tests/expected.txt").unwrap();
     let mut expected = vec![];
     expected_file.read_to_end(&mut expected);
 
-    assert_eq!(decompressed, expected);
+    assert_eq!(decompressed.into_inner(), expected);
 }
