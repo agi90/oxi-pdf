@@ -6,3 +6,6 @@ edition = "2018"
 
 [dependencies]
 deflate = { path = "../deflate" }
+
+[profile.release]
+debug = true

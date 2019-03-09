@@ -1,3 +1,5 @@
+#![feature(reverse_bits)]
+
 mod deflate;
 mod gzip;
 mod bit_reader;

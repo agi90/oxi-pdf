@@ -1471,6 +1471,10 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
 
                         panic!();
                     }
+                    let string = String::from_utf8(decoded.into_inner());
+                    if let Ok(x) = string {
+                        println!("{}", x);
+                    }
                 }
             }
         } else {

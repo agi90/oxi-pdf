@@ -9,9 +9,8 @@ use std::io::{
     Read,
 };
 
-use std::collections::HashMap;
-
 use std::cmp;
+use std::mem;
 
 use crate::bit_reader::{
     ReadBits,
@@ -113,14 +112,18 @@ pub fn rfc1951(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
         }
     }
 
-    // TODO: checksum
-
     Ok(length)
 }
 
 #[derive(Debug)]
+struct Code {
+    length: usize,
+    data: Vec<i64>,
+}
+
+#[derive(Debug)]
 struct HuffmanCode {
-    codes: HashMap<usize, Vec<i64>>,
+    codes: Vec<Code>,
     min_length: usize,
     max_length: usize,
 }
@@ -132,8 +135,9 @@ fn generate_fixed_distance_code() -> HuffmanCode {
         code_5_bits[i] = i as i64;
     }
 
-    let mut codes = HashMap::new();
-    codes.insert(5, code_5_bits);
+    let mut codes = vec![
+        Code { length: 5, data: code_5_bits },
+    ];
 
     HuffmanCode {
         codes,
@@ -179,10 +183,11 @@ fn generate_fixed_huffman() -> HuffmanCode {
         mapped += 1;
     }
 
-    let mut codes = HashMap::new();
-    codes.insert(7, code_7_bits.to_vec());
-    codes.insert(8, code_8_bits.to_vec());
-    codes.insert(9, code_9_bits.to_vec());
+    let mut codes = vec![
+        Code { length: 7, data: code_7_bits.to_vec() },
+        Code { length: 8, data: code_8_bits.to_vec() },
+        Code { length: 9, data: code_9_bits.to_vec() },
+    ];
 
     HuffmanCode {
         codes,
@@ -299,19 +304,31 @@ fn generate_codes(code_lengths: &[u8]) -> HuffmanCode {
     }
 
     // Step 3
-    let mut codes: HashMap<usize, Vec<i64>> = HashMap::new();
+    let max_code_lengths = *code_lengths.iter().max().unwrap_or(&0);
+    let mut codes = vec![vec![]; (max_code_lengths + 1) as usize];
 
     for n in 0..code_lengths.len() {
         let len = code_lengths[n] as usize;
         if len == 0 { continue; }
 
-        codes.entry(len).or_insert(vec![-1; 1 << len]);
-        codes.get_mut(&len).unwrap()[next_code[len]] = n as i64;
-
+        if codes[len].len() == 0 {
+            codes[len] = vec![-1; 1 << len];
+        }
+        codes[len][next_code[len]] = n as i64;
         next_code[len] += 1;
     }
 
-    HuffmanCode { codes, min_length, max_length }
+    let mut result_codes = vec![];
+    for i in 1 ..= max_code_lengths as usize {
+        if codes[i].len() == 0 {
+            continue;
+        }
+
+        let data = mem::replace(&mut codes[i], vec![]);
+        result_codes.push(Code { length: i, data });
+    }
+
+    HuffmanCode { codes: result_codes, min_length, max_length }
 }
 
 struct HuffmanAdapter<'a> {
@@ -344,14 +361,15 @@ impl <'a> HuffmanAdapter<'a> {
     }
 
     fn next_code_impl(&mut self, coder: &HuffmanCode) -> io::Result<u16> {
-        let mut x = self.data.read_bits(coder.min_length)? as usize;
-        let mut length = coder.min_length;
-        while length <= coder.max_length {
-            if coder.codes.contains_key(&length) && coder.codes[&length][x] != -1 {
-                return Ok(coder.codes[&length][x] as u16);
-            } else {
-                x = (x << 1) + self.data.read_bits(1)? as usize;
-                length += 1;
+        let mut x = 0;
+        let mut length = 0;
+        for code in &coder.codes {
+            let diff = code.length - length;
+            x = (x << diff) + self.data.read_bits(diff)? as usize;
+            length += diff;
+
+            if code.data[x] != -1 {
+                return Ok(code.data[x] as u16);
             }
         }
 
