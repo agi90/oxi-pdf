@@ -1,11 +1,8 @@
 [package]
 name = "oxi-pdf"
 version = "0.1.0"
-authors = ["Agi Sferro <agi.novanta@gmail.com>"]
+authors = ["Agi Sferro <agi@sferro.dev>"]
 edition = "2018"
 
 [dependencies]
 deflate = { path = "../deflate" }
-
-[profile.release]
-debug = true
