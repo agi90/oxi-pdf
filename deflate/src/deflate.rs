@@ -99,17 +99,19 @@ pub fn rfc1951(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
             },
         }
 
-        if decoded.len() > MAX_LOOKBACK {
-            let new_decoded = decoded.split_off(decoded.len() - MAX_LOOKBACK);
-            length += decoded.len();
-            out.write(&decoded[..]);
+        if decoded.len() > 2 * MAX_LOOKBACK {
+            let extra_length = decoded.len() - MAX_LOOKBACK;
+            let written = out.write(&decoded[..extra_length]);
 
-            decoded = new_decoded;
+            if let Ok(count) = written {
+              length += count;
+              decoded.drain(0..count);
+            }
         }
 
         if bfinal > 0 {
             length += decoded.len();
-            out.write(&decoded[..]);
+            out.write_all(&decoded[..])?;
             break;
         }
     }
