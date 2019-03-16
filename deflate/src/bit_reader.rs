@@ -93,10 +93,13 @@ impl ReadBits for BitReader {
         //
         // out    = 00000000000000000000000000000000XXXXXXXXXXXXXXXYYYYYYYYY
 
-        let mut piece = (self.buffer & (U64_BIT_MASK >> 64 - len)) << start;
+        assert!(len < 64);
+        assert!(start < 64);
+
+        let piece = (self.buffer & (U64_BIT_MASK >> (64 - len))) << start;
         result = ((piece + result) << (64 - len - start)).reverse_bits();
 
-        self.buffer = (self.buffer >> len);
+        self.buffer = self.buffer >> len;
         self.buffer_size -= len;
 
         Ok(result)

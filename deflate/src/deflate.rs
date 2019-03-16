@@ -35,6 +35,8 @@ impl EncodingType {
     }
 }
 
+// This looks like a rust bug? This function is clearly used
+#[allow(dead_code)]
 pub fn rfc1950(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
     let compression_method = data.read_number(4)?;
     let compression_info = data.read_number(4)?;
@@ -135,7 +137,7 @@ fn generate_fixed_distance_code() -> HuffmanCode {
         code_5_bits[i] = i as i64;
     }
 
-    let mut codes = vec![
+    let codes = vec![
         Code { length: 5, data: code_5_bits },
     ];
 
@@ -183,7 +185,7 @@ fn generate_fixed_huffman() -> HuffmanCode {
         mapped += 1;
     }
 
-    let mut codes = vec![
+    let codes = vec![
         Code { length: 7, data: code_7_bits.to_vec() },
         Code { length: 8, data: code_8_bits.to_vec() },
         Code { length: 9, data: code_9_bits.to_vec() },
@@ -483,47 +485,43 @@ impl <'a> HuffmanAdapter<'a> {
 fn read_huffman(mut data: HuffmanAdapter, out: &mut Vec<u8>) -> io::Result<()> {
     loop {
         let code = data.next_code();
-        match code {
-            Ok(x) => {
-                if x < 256 {
-                    out.push(x as u8);
-                } else if x == 256 {
-                    return Ok(());
-                } else {
-                    let (mut length, distance) = data.read_distance(x)?;
-                    if out.len() < distance {
-                        panic!("Buffer is not big enough. distance = {} buffer = {}", distance, out.len());
-                        // return Err(Error::new(ErrorKind::Other, "distance value invalid."));
-                    }
+        if let Ok(x) = code {
+            if x < 256 {
+                out.push(x as u8);
+            } else if x == 256 {
+                return Ok(());
+            } else {
+                let (mut length, distance) = data.read_distance(x)?;
+                if out.len() < distance {
+                    panic!("Buffer is not big enough. distance = {} buffer = {}", distance, out.len());
+                    // return Err(Error::new(ErrorKind::Other, "distance value invalid."));
+                }
 
-                    let start = out.len() - distance;
+                let start = out.len() - distance;
 
-                    // If the buffer is not long enough, we will just repeat
-                    // the characters until we fill the specified length
-                    let end = cmp::min(out.len(), start + length);
+                // If the buffer is not long enough, we will just repeat
+                // the characters until we fill the specified length
+                let end = cmp::min(out.len(), start + length);
 
-                    let match_ = (&out[start..end]).to_vec();
+                out.reserve(length);
+                let match_ = &out[start..end].to_vec();
 
-                    loop {
-                        // If this is the last repeated section we need to clip
-                        // the match to make it fit in the buffer.
-                        let bound = cmp::min(match_.len(), length);
-                        out.append(&mut (&match_[0..bound]).to_vec());
+                loop {
+                    // If this is the last repeated section we need to clip
+                    // the match to make it fit in the buffer.
+                    let bound = cmp::min(match_.len(), length);
+                    out.append(&mut (&match_[0..bound]).to_vec());
 
-                        if length > match_.len() {
-                            length -= match_.len();
-                        } else {
-                            break;
-                        }
+                    if length > match_.len() {
+                        length -= match_.len();
+                    } else {
+                        break;
                     }
                 }
-            },
-            Err(error) => {
-                match error.kind() {
-                    _ => return Err(error),
-                }
-            },
-        }
+            }
+        } else {
+            return code.map(|_| ());
+        };
     }
 }
 

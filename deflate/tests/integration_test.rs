@@ -21,7 +21,7 @@ fn test_rfc1952() {
 
     let mut expected_file = File::open("tests/expected.txt").unwrap();
     let mut expected = vec![];
-    expected_file.read_to_end(&mut expected);
+    expected_file.read_to_end(&mut expected).unwrap();
 
     assert_eq!(decompressed.into_inner(), expected);
 }

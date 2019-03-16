@@ -98,10 +98,10 @@ pub fn rfc1952(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
     }
 
     let flags = Flag::from(data.read_number(8)? as u8);
-    let time = data.read_number(32)?;
+    let _time = data.read_number(32)?;
     let _xfl = data.read_number(8)?;
 
-    let os = Os::from(data.read_number(8)? as u8)
+    let _os = Os::from(data.read_number(8)? as u8)
         .ok_or(Error::new(ErrorKind::Other, "Unknown OS"))?;
 
     if flags.contains(&Flag::Extra) {
@@ -109,11 +109,11 @@ pub fn rfc1952(data: &mut BitReader, out: &mut Write) -> io::Result<usize> {
         unimplemented!();
     }
 
-    let name;
+    let _name;
     if flags.contains(&Flag::Name) {
-        name = read_name(data)?;
+        _name = read_name(data)?;
     } else {
-        name = "unknown".to_string();
+        _name = "unknown".to_string();
     }
 
     if flags.contains(&Flag::Comment) {

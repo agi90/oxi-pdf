@@ -8,18 +8,15 @@ use crate::gzip::rfc1952;
 use crate::bit_reader::BitReader;
 
 extern crate clap;
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App};
 
 use std::io;
 use std::io::{
-    Write,
-    Read,
     BufReader,
     BufWriter,
 };
 
 use std::fs::File;
-use std::env;
 
 fn main() -> io::Result<()> {
     let matches = App::new("Uncompress gzip archives.")
