@@ -5,11 +5,17 @@ use std::{
     str::FromStr,
     io::{
         Cursor,
+        Write,
     },
+    fs::File,
+    fs,
+    path::Path,
     mem,
     convert::From,
     ops::Try,
 };
+
+use uuid::Uuid;
 
 use crate::deflate::{
     BitReader,
@@ -771,15 +777,36 @@ impl Stream {
                 .map_err(|e| e.to_string())?;
         }
 
-        mem::swap(&mut self.data, &mut decoded.into_inner());
+        self.data = decoded.into_inner();
+        Ok(())
+    }
+
+    // For DCT decode (basically a Jpeg) we save it to a file and store
+    // the file name in the data
+    fn apply_dct_decode(&mut self) -> Result<(), String> {
+        if !Path::new("images").exists() {
+            fs::create_dir("images").map_err(|e| e.to_string())?;
+        }
+        let filename = "images/".to_string() +
+                &Uuid::new_v4().to_simple().to_string() + ".jpg";
+        let mut file = File::create(&filename).unwrap();
+        file.write_all(&self.data[..]).unwrap();
+
+        self.data = filename.into_bytes();
         Ok(())
     }
 
     pub fn apply_filters(&mut self) -> Result<(), String> {
-        for filter in self.metadata.filters.clone() {
+        let mut filters = vec![];
+        mem::swap(&mut self.metadata.filters, &mut filters);
+
+        for filter in filters {
             match filter {
                 Filter::FlateDecode => self.apply_flate_decode()?,
-                _ => return Err(format!("Unimplemented filter {:?}.", filter)),
+                Filter::DCTDecode => self.apply_dct_decode()?,
+                _ => {
+                    panic!(format!("Unimplemented filter {:?}.", filter));
+                }
             }
         }
 
@@ -1597,13 +1624,9 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
             result = r.data;
 
             if let PdfObject::Stream(ref mut s) = result.object {
-                // TODO: actually check if applying filters works
-                let _ = s.apply_filters();
-                if s.metadata.filters.contains(&Filter::FlateDecode) {
-                    let string = String::from_utf8(s.clone().data);
-                    if let Ok(x) = string {
-                        println!("{}", x);
-                    }
+                s.apply_filters()?;
+                if let Ok(utf8) = String::from_utf8(s.data.clone()) {
+                    println!("{}", utf8);
                 }
             }
         } else {

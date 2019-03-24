@@ -6,3 +6,4 @@ edition = "2018"
 
 [dependencies]
 deflate = { path = "../deflate" }
+uuid = { version = "0.7", features = ["v4"] }

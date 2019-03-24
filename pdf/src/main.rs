@@ -7,6 +7,7 @@ mod types;
 mod font;
 
 extern crate deflate;
+extern crate uuid;
 
 use std::fs::File;
 use std::io::Read;
