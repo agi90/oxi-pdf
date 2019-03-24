@@ -1,4 +1,4 @@
-// #![feature(const_fn)]
+#![feature(try_trait)]
 
 #[macro_use]
 mod parser;

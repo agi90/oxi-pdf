@@ -6,6 +6,9 @@ use std::{
     io::{
         Cursor,
     },
+    mem,
+    convert::From,
+    ops::Try,
 };
 
 use crate::deflate::{
@@ -87,7 +90,7 @@ macro_rules! block {
             result
         }
     };
-    ($data: ident, $f: ident, $param: expr) => {
+    ($data: expr, $f: ident, $param: expr) => {
         {
             let result;
             if let Res::Found(r) = $f($data, $param) {
@@ -184,6 +187,33 @@ enum Res<'a, T> {
 struct Found<'a, T> {
     data: T,
     remaining: &'a [u8],
+}
+
+impl <'a, T> Try for Res<'a, T> {
+    type Ok = Res<'a, T>;
+    type Error = Res<'a, T>;
+
+    fn into_result(self) -> Result<Res<'a, T>, Res<'a, T>> {
+        match self {
+            Res::Found(x) => Ok(Res::Found(x)),
+            Res::Error => Err(Res::Error),
+            Res::NotFound => Err(Res::Error),
+        }
+    }
+
+    fn from_error(v: Res<'a, T>) -> Self {
+        v
+    }
+
+    fn from_ok(v: Res<'a, T>) -> Self {
+        v
+    }
+}
+
+impl <'a, T> From<String> for Res<'a, T> {
+    fn from(_: String) -> Self {
+        Res::Error
+    }
 }
 
 impl <'a, T> Res<'a, T> {
@@ -394,6 +424,24 @@ fn integer(data: &[u8]) -> Res<'_, i64> {
     }
 
     Res::i64(&data[0..i], &data[i..])
+}
+
+// 7.5.8.3
+fn binary_integer(data: &[u8], size: usize) -> Res<'_, u64> {
+    if size > 8 {
+        return Res::Error;
+    }
+
+    if data.len() < size {
+        return Res::NotFound;
+    }
+
+    let mut result: u64 = 0;
+    for i in &data[..size] {
+        result = (result << 8) + *i as u64;
+    }
+
+    Res::found(result, &data[size..])
 }
 
 fn nonnegative_integer(mut data: &[u8]) -> Res<'_, u64> {
@@ -703,16 +751,44 @@ pub struct Stream {
 }
 
 impl Stream {
-    fn new(data: &[u8], metadata: StreamMetadata) -> Stream {
+    pub fn new(data: &[u8], metadata: StreamMetadata) -> Stream {
         Stream {
             data: data.to_vec(),
             metadata,
         }
     }
+
+    fn apply_flate_decode(&mut self) -> Result<(), String> {
+        let mut data = vec![];
+        mem::swap(&mut self.data, &mut data);
+
+        let mut decoded;
+        {
+            let mut reader = BitReader::new(Box::new(Cursor::new(
+                data)));
+            decoded = Cursor::new(vec![]);
+            rfc1950(&mut reader, &mut decoded)
+                .map_err(|e| e.to_string())?;
+        }
+
+        mem::swap(&mut self.data, &mut decoded.into_inner());
+        Ok(())
+    }
+
+    pub fn apply_filters(&mut self) -> Result<(), String> {
+        for filter in self.metadata.filters.clone() {
+            match filter {
+                Filter::FlateDecode => self.apply_flate_decode()?,
+                _ => return Err(format!("Unimplemented filter {:?}.", filter)),
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Filter {
+pub enum Filter {
     ASCIIHexDecode,
     ASCII85Decode,
     LZWDecode,
@@ -755,9 +831,10 @@ impl Filter {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-struct StreamMetadata {
+pub struct StreamMetadata {
     length: usize,
     filters: Vec<Filter>,
+    dictionary: PdfDictionary,
     // TODO: the rest of the fields
 }
 
@@ -770,6 +847,7 @@ impl StreamMetadata {
                     filters: dictionary.get("Filter")
                         .and_then(Filter::from_vec)
                         .unwrap_or(vec![]),
+                    dictionary,
                 })
             } else {
                 None
@@ -1263,6 +1341,7 @@ fn dictionary(mut data: &[u8]) -> Res<'_, PdfDictionary> {
 enum XrefType {
     Free,
     InUse,
+    Compressed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1333,7 +1412,7 @@ impl Xref {
 }
 
 // 7.5.4
-fn xref_table(mut data: &[u8]) -> Res<'_, HashMap<Key, Xref>> {
+fn xref_table(mut data: &[u8]) -> Res<'_, HashMap<u64, Xref>> {
     exact!(data, "xref");
     data = consume_whitespace(data);
 
@@ -1348,11 +1427,63 @@ fn xref_table(mut data: &[u8]) -> Res<'_, HashMap<Key, Xref>> {
         for i in 0..entries {
             let xref_entry = block!(data, xref_entry);
             let xref = Xref::from(xref_entry, object_number as u64 + i);
-            xref_table.insert(xref.key, xref);
+            xref_table.insert(xref.key.object, xref);
         }
     }
 
     Res::found(xref_table, data)
+}
+
+// 7.5.8.2
+fn xref_binary_entry<'a>(mut data: &'a [u8], w: &[usize]) -> Res<'a, XrefEntry> {
+    let type_ = block!(data, binary_integer, w[0]);
+    let offset = block!(data, binary_integer, w[1]) as usize;
+    let generation_number = block!(data, binary_integer, w[2]);
+
+    let xref_type = match type_ {
+        0 => XrefType::Free,
+        1 => XrefType::InUse,
+        2 => XrefType::Compressed,
+        // XXX: this should be a ref to null
+        _ => XrefType::Free,
+    };
+
+    Res::found(XrefEntry { offset, generation_number, type_: xref_type}, data)
+}
+
+// 7.5.8.2
+fn xref_binary_table<'a>(mut data: &'a [u8], w: &[usize]) -> Res<'a, HashMap<u64, Xref>> {
+    let mut xref_table = HashMap::new();
+    let mut object_number = 0;
+
+    while data.len() > 0 {
+        let xref_entry = block!(data, xref_binary_entry, w);
+        let xref = Xref::from(xref_entry, object_number);
+        xref_table.insert(xref.key.object, xref);
+        object_number += 1;
+    }
+
+    Res::found(xref_table, data)
+}
+
+// 7.5.8.1
+fn xref_stream(mut data: &[u8]) -> Res<'_, HashMap<u64, Xref>> {
+    let definition = block!(data, stream_definition, &mut |r| PdfObject::Reference(*r));
+
+    match definition.object {
+        PdfObject::Stream(mut stream) => {
+            let w: Vec<usize> = stream.metadata.dictionary.integer_array("W")
+                .map(|it| it.map(|x| x as usize).collect())
+                .unwrap_or_else(|| vec![]);
+
+            stream.apply_filters()?;
+
+            let mut _stream_data = &stream.data[..];
+            let xref = block!(_stream_data, xref_binary_table, w.as_slice());
+            Res::found(xref, data)
+        },
+        _ => { Res::Error },
+    }
 }
 
 // 7.5.5
@@ -1376,16 +1507,15 @@ fn trailer(mut data: &[u8]) -> Res<'_, PdfDictionary> {
 #[derive(Debug)]
 pub struct Pdf {
     version: Version,
-    objects: HashMap<Key, PdfObject>,
-    trailer: PdfDictionary,
+    objects: HashMap<u64, PdfObject>,
 }
 
 impl Pdf {
     pub fn resolve(&self, key: &Key) -> &PdfObject {
-        self.objects.get(key).unwrap_or(&PdfObject::Null)
+        self.objects.get(&key.object).unwrap_or(&PdfObject::Null)
     }
 
-    pub fn objects(&self) -> &HashMap<Key, PdfObject> {
+    pub fn objects(&self) -> &HashMap<u64, PdfObject> {
         &self.objects
     }
 }
@@ -1402,9 +1532,9 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
     // First, let's find the `startxref` reference at the end of the file.
     let mut end = data.len() - 1;
     let startxref_obj = loop {
-        if end == 0 {
-            // We got to the beginning and didn't find a startxref, this is not
-            // a valid PDF
+        if data.len() - end > 100 {
+            // The offset can only be so many bytes, if we got this far this is not a
+            // valid PDF file.
             return Res::NotFound;
         }
 
@@ -1435,13 +1565,23 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
     }
 
     let mut xref_data = &data[startxref_index..];
-    let xref = block!(xref_data, xref_table);
 
-    let trailer = block!(xref_data, trailer);
-    xref_data = consume_whitespace(xref_data);
+    let has_binary_xref;
+    let xref;
+    // The xref table can either be explicit on in a stream object
+    if let Res::Found(r) = xref_table(xref_data) {
+        xref = r.data;
+        xref_data = r.remaining;
+        block!(xref_data, trailer);
+        xref_data = consume_whitespace(xref_data);
 
-    // We should be back at startxref now
-    block!(xref_data, startxref);
+        // We should be back at startxref now
+        block!(xref_data, startxref);
+        has_binary_xref = false;
+    } else {
+        xref = block!(xref_data, xref_stream);
+        has_binary_xref = true;
+    }
 
     let version = block!(data, version);
     data = consume_whitespace(data);
@@ -1449,29 +1589,18 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
     let mut objects = HashMap::new();
 
     loop {
-        let result;
+        let mut result;
         if let Res::Found(r) = stream_definition(data, &mut |k| {
             resolve(k, &xref, &mut objects, original_data).clone()
         }) {
             data = r.remaining;
             result = r.data;
 
-            if let PdfObject::Stream(ref s) = result.object {
+            if let PdfObject::Stream(ref mut s) = result.object {
+                // TODO: actually check if applying filters works
+                let _ = s.apply_filters();
                 if s.metadata.filters.contains(&Filter::FlateDecode) {
-                    let mut reader = BitReader::new(Box::new(Cursor::new(
-                            s.data.clone())));
-                    let mut decoded = Cursor::new(vec![]);
-                    let len = rfc1950(&mut reader, &mut decoded);
-                    if len.is_err() {
-                        for x in &s.data {
-                            print!("{:02X}", x);
-                        }
-                        println!("");
-                        println!("{:?}", decoded);
-
-                        panic!();
-                    }
-                    let string = String::from_utf8(decoded.into_inner());
+                    let string = String::from_utf8(s.clone().data);
                     if let Ok(x) = string {
                         println!("{}", x);
                     }
@@ -1481,30 +1610,31 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
             result = repeat!(data, definition);
         }
 
-        objects.insert(result.key, result.object);
+        objects.insert(result.key.object, result.object);
         data = consume_whitespace(data);
     }
 
-    // After all the definitions we should be back at the xref table
-    exact!(data, "xref");
+    // After all the definitions we should be back at the xref table or at startxref
+    if has_binary_xref {
+        exact!(data, "startxref");
+    } else {
+        exact!(data, "xref");
+    }
 
     Res::found(Pdf {
         version,
-        trailer: resolve_dictionary(trailer, &mut |k| {
-            resolve(k, &xref, &mut objects, original_data).clone()
-        }),
         objects,
     }, &[])
 }
 
-fn resolve<'a>(key: &Key, xref: &HashMap<Key, Xref>,
-           objects: &'a mut HashMap<Key, PdfObject>,
+fn resolve<'a>(key: &Key, xref: &HashMap<u64, Xref>,
+           objects: &'a mut HashMap<u64, PdfObject>,
            data: &[u8]) -> &'a PdfObject {
-    if objects.contains_key(key) {
-        return objects.get(key).unwrap();
+    if objects.contains_key(&key.object) {
+        return objects.get(&key.object).unwrap();
     }
 
-    let offset = xref[key].offset;
+    let offset = xref[&key.object].offset;
     let resolved_data = &data[offset..];
 
     match definition(resolved_data) {
@@ -1512,8 +1642,8 @@ fn resolve<'a>(key: &Key, xref: &HashMap<Key, Xref>,
             if x.data.key != *key {
                 panic!("Expected {:?} but found {:?}", key, x.data.key);
             }
-            objects.insert(x.data.key, x.data.object);
-            objects.get(key).unwrap()
+            objects.insert(x.data.key.object, x.data.object);
+            objects.get(&key.object).unwrap()
         }
         Res::NotFound | Res::Error => &PdfObject::Null,
     }
@@ -1933,9 +2063,9 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 PdfObject::string("Brilling")), "");
     }
 
-    fn stream_test(data: &str, expected: &str, remaining: &str, objects: HashMap<Key, PdfObject>) {
+    fn stream_test(data: &str, expected: &str, remaining: &str, objects: HashMap<u64, PdfObject>) {
         let result = stream(data.as_bytes(), &mut |key|
-            objects.get(key).unwrap_or(&PdfObject::Null).clone()).unwrap();
+            objects.get(&key.object).unwrap_or(&PdfObject::Null).clone()).unwrap();
         assert_eq!(from_bytes(&result.data.data[..]).as_str(), expected);
         assert_eq!(from_bytes(result.remaining).as_str(), remaining);
     }
@@ -1953,7 +2083,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             stream\n\
                 123456789012\n\
             endstream", "123456789012", "",
-            [(Key::new(8, 0), PdfObject::Integer(12))]
+            [(8, PdfObject::Integer(12))]
                 .iter().cloned().collect());
     }
 
@@ -2004,7 +2134,7 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                 XrefEntry::new(3, 0, XrefType::InUse), "");
     }
 
-    test!(xref_table_test, xref_table, HashMap<Key, Xref>);
+    test!(xref_table_test, xref_table, HashMap<u64, Xref>);
 
     #[test]
     fn test_xref_table() {
@@ -2017,12 +2147,12 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000000000 00007 f\r\n\
             0000000331 00000 n\r\n\
             0000000409 00000 n\r\n",
-        [(Key::new(0, 65535), Xref::new(3,   0, 65535, XrefType::Free)),
-         (Key::new(1, 0    ), Xref::new(17,  1, 0,     XrefType::InUse)),
-         (Key::new(2, 0    ), Xref::new(81,  2, 0,     XrefType::InUse)),
-         (Key::new(3, 7    ), Xref::new(0,   3, 7,     XrefType::Free)),
-         (Key::new(4, 0    ), Xref::new(331, 4, 0,     XrefType::InUse)),
-         (Key::new(5, 0    ), Xref::new(409, 5, 0,     XrefType::InUse)),
+        [(0, Xref::new(3,   0, 65535, XrefType::Free)),
+         (1, Xref::new(17,  1, 0,     XrefType::InUse)),
+         (2, Xref::new(81,  2, 0,     XrefType::InUse)),
+         (3, Xref::new(0,   3, 7,     XrefType::Free)),
+         (4, Xref::new(331, 4, 0,     XrefType::InUse)),
+         (5, Xref::new(409, 5, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
         xref_table_test("xref\n\
             0 1\n\
@@ -2034,11 +2164,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
             0000025635 00000 n\r\n\
             30 1\n\
             0000025777 00000 n\r\n",
-        [(Key::new(0,  65535), Xref::new(0,     0,  65535, XrefType::Free)),
-         (Key::new(3,  0    ), Xref::new(25325, 3,  0,     XrefType::InUse)),
-         (Key::new(23, 2    ), Xref::new(25518, 23, 2,     XrefType::InUse)),
-         (Key::new(24, 0    ), Xref::new(25635, 24, 0,     XrefType::InUse)),
-         (Key::new(30, 0    ), Xref::new(25777, 30, 0,     XrefType::InUse)),
+        [(0,  Xref::new(0,     0,  65535, XrefType::Free)),
+         (3,  Xref::new(25325, 3,  0,     XrefType::InUse)),
+         (23, Xref::new(25518, 23, 2,     XrefType::InUse)),
+         (24, Xref::new(25635, 24, 0,     XrefType::InUse)),
+         (30, Xref::new(25777, 30, 0,     XrefType::InUse)),
         ].iter().cloned().collect(), "");
     }
 
@@ -2074,5 +2204,11 @@ special characters (*!&}^% and so on).)", "Strings may contain balanced parenthe
                      ("Info".to_string(), PdfObject::reference(2, 0))]
                         .iter().cloned().collect())
                 , "");
+    }
+
+    #[test]
+    fn test_binary_integer() {
+        assert_eq!(binary_integer(&[0, 0xFF], 2).unwrap().data, 0xFF);
+        assert_eq!(binary_integer(&[0xFF, 0x00], 2).unwrap().data, 0xFF00);
     }
 }
