@@ -2,8 +2,11 @@ use std::collections::HashMap;
 
 use crate::parser;
 use crate::parser::{
+    PdfObject,
     PdfDictionary,
     OptionalFrom,
+    parse_page,
+    Operator,
 };
 use crate::types::{
     NumberTreeNode,
@@ -14,11 +17,13 @@ use crate::font::{
 };
 
 pub fn resolve_pdf(pdf: &parser::Pdf) -> Result<(), String> {
+    let mut catalog = None;
     for object in pdf.objects().values() {
         if let Some(dictionary) = object.as_dictionary(pdf) {
             if let Some(type_) = dictionary.identifier("Type") {
                 if type_ == "Catalog" {
-                    Catalog::from(dictionary, pdf).ok_or("Missing Catalog.")?;
+                    catalog = Some(Catalog::from(dictionary, pdf)
+                        .ok_or("Missing Catalog.")?);
                 } else if type_ == "Font" {
                     let _font : Option<Font> = OptionalFrom::from(object, pdf);
                 }
@@ -26,11 +31,13 @@ pub fn resolve_pdf(pdf: &parser::Pdf) -> Result<(), String> {
         }
     }
 
+    println!("{:?}", catalog);
     Ok(())
 }
 
 // Table 28
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct Catalog {
     page_tree: PageTree,
     page_labels: Option<NumberTreeNode>,
@@ -40,7 +47,7 @@ impl Catalog {
     // 7.7.2
     fn from(metadata: &PdfDictionary,
             pdf: &parser::Pdf) -> Option<Catalog> {
-
+        println!("=== Catalog");
         let page_tree = metadata.dictionary("Pages", pdf)
             .and_then(|pt| PageTree::from(pt, pdf))?;
 
@@ -86,9 +93,24 @@ impl PageTree {
 }
 
 #[derive(Debug, Clone)]
+struct Contents {
+    draw_commands: Vec<(Vec<PdfObject>, Operator)>,
+}
+
+impl Contents {
+    // 7.8.2
+    pub fn from(data: &PdfObject, pdf: &parser::Pdf) -> Option<Contents> {
+        let contents = pdf.resolve(data.as_reference()?).as_stream()?;
+        let draw_commands = parse_page(&contents.data[..]).ok()?;
+        Some(Contents { draw_commands })
+    }
+}
+
+#[derive(Debug, Clone)]
 struct PageData {
     media_box: Option<Rectangle>,
     resources: Option<Resources>,
+    contents: Option<Contents>,
 }
 
 impl PageData {
@@ -99,6 +121,8 @@ impl PageData {
                 .and_then(|mb| OptionalFrom::from(mb, pdf)),
             resources: data.dictionary("Resources", pdf)
                     .and_then(|r| Resources::from(r, pdf)),
+            contents: data.get("Contents")
+                .and_then(|c| Contents::from(c, pdf)),
         })
     }
 }
@@ -166,6 +190,7 @@ impl GraphicsState {
     }
 }
 
+#[allow(dead_code)] // Will use this
 #[derive(Debug, Clone)]
 struct Resources {
     proc_set: Vec<ProcSet>,
@@ -187,5 +212,71 @@ impl Resources {
         });
 
         resources
+    }
+}
+
+#[allow(dead_code)] // Will use this
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+enum InlineImageKey {
+    BitsPerComponent,
+    ColorSpace,
+    Decode,
+    DecodeParams,
+    Filter,
+    Height,
+    ImageMask,
+    Intent,
+    Interpolate,
+    Width,
+}
+
+#[allow(dead_code)] // Will use this
+impl InlineImageKey {
+    fn from(key: String) -> Option<InlineImageKey> {
+       let mapped = match key.as_str() {
+            "BitsPerComponent" | "BPC" => InlineImageKey::BitsPerComponent,
+            "ColorSpace" | "CS" => InlineImageKey::ColorSpace,
+            "Decode" | "D" => InlineImageKey::Decode,
+            "DecodeParams" | "DP" => InlineImageKey::DecodeParams,
+            "Filter" | "F" => InlineImageKey::Filter,
+            "Height" | "H" => InlineImageKey::Height,
+            "ImageMask" | "IM" => InlineImageKey::ImageMask,
+            "Intent" => InlineImageKey::Intent,
+            "Interpolate" | "I" => InlineImageKey::Interpolate,
+            "Width" | "W" => InlineImageKey::Width,
+            _ => return None,
+        };
+
+        Some(mapped)
+    }
+}
+
+#[allow(dead_code)] // Will use this
+#[derive(Debug, Clone, Copy)]
+enum ColorSpace {
+    Gray,
+    RGB,
+    CMYK,
+}
+
+#[allow(dead_code)] // Will use this
+impl ColorSpace {
+    fn from(key: &str) -> Option<ColorSpace> {
+        let result = match key {
+            "DeviceGray" | "G" => ColorSpace::Gray,
+            "DeviceRGB" | "RGB" => ColorSpace::RGB,
+            "DeviceCMYK" | "CMYK" => ColorSpace::CMYK,
+            _ => { return None; }
+        };
+
+        return Some(result);
+    }
+
+    fn components(&self) -> usize {
+        match self {
+            ColorSpace::Gray => 1,
+            ColorSpace::RGB => 3,
+            ColorSpace::CMYK => 4,
+        }
     }
 }

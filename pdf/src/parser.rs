@@ -66,8 +66,8 @@ const ASCII_F_LOWERCASE: u8          = 0x66;
 const ASCII_N_LOWERCASE: u8          = 0x6E;
 const ASCII_TILDE: u8                = 0x7E;
 
-fn resolve_dictionary<F>(dictionary: PdfDictionary, resolve: &mut F) -> PdfDictionary
-where F: FnMut(&Key) -> PdfObject {
+fn resolve_dictionary<F>(dictionary: PdfDictionary, resolve: &mut F)
+        -> PdfDictionary where F: FnMut(&Key) -> PdfObject {
     let mut result = HashMap::new();
 
     for (key, object) in dictionary.data {
@@ -196,23 +196,25 @@ struct Found<'a, T> {
 }
 
 impl <'a, T> Try for Res<'a, T> {
-    type Ok = Res<'a, T>;
-    type Error = Res<'a, T>;
+    type Ok = T;
+    type Error = String;
 
-    fn into_result(self) -> Result<Res<'a, T>, Res<'a, T>> {
+    fn into_result(self) -> Result<T, String> {
         match self {
-            Res::Found(x) => Ok(Res::Found(x)),
-            Res::Error => Err(Res::Error),
-            Res::NotFound => Err(Res::Error),
+            Res::Found(x) => Ok(x.data),
+            Res::Error => Err(
+                "There was an error parsing this element".to_string()),
+            Res::NotFound => Err(
+                "The element was not found".to_string()),
         }
     }
 
-    fn from_error(v: Res<'a, T>) -> Self {
-        v
+    fn from_error(_: String) -> Self {
+        Res::Error
     }
 
-    fn from_ok(v: Res<'a, T>) -> Self {
-        v
+    fn from_ok(v: T) -> Self {
+        Res::found(v, &[])
     }
 }
 
@@ -752,15 +754,18 @@ impl Definition {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stream {
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     metadata: StreamMetadata,
+    is_inline_image: bool,
 }
 
 impl Stream {
-    pub fn new(data: &[u8], metadata: StreamMetadata) -> Stream {
+    pub fn new(data: &[u8], metadata: StreamMetadata,
+               is_inline_image: bool) -> Stream {
         Stream {
             data: data.to_vec(),
             metadata,
+            is_inline_image,
         }
     }
 
@@ -845,6 +850,30 @@ impl Filter {
         })
     }
 
+    // Table 94
+    fn from_inline_image(obj: &PdfObject) -> Option<Filter> {
+        Some(match obj.as_identifier()? {
+            "ASCIIHexDecode" | "AHx" => Filter::ASCIIHexDecode,
+            "ASCII85Decode" | "A85" => Filter::ASCII85Decode,
+            "LZWDecode" | "LZW" => Filter::LZWDecode,
+            "FlateDecode" | "Fl" => Filter::FlateDecode,
+            "RunLengthDecode" | "RL" => Filter::RunLengthDecode,
+            "CCITTFaxDecode" | "CCF" => Filter::CCITTFaxDecode,
+            "DCTDecode" | "DCT" => Filter::DCTDecode,
+            _ => return None,
+        })
+    }
+
+    fn from_vec_inline_image(obj: &PdfObject) -> Option<Vec<Filter>> {
+        if obj.as_identifier().is_some() {
+            Some(vec![Filter::from_inline_image(obj)?])
+        } else {
+            Some(obj.as_array()?.iter()
+                .filter_map(Filter::from_inline_image)
+                .collect())
+        }
+    }
+
     fn from_vec(obj: &PdfObject) -> Option<Vec<Filter>> {
         if obj.as_identifier().is_some() {
             Some(vec![Filter::from(obj)?])
@@ -867,20 +896,30 @@ pub struct StreamMetadata {
 
 impl StreamMetadata {
     fn from(dictionary: PdfDictionary) -> Option<StreamMetadata> {
-        match dictionary.integer("Length") {
-            Some(length) => if length >= 0 {
-                Some(StreamMetadata {
-                    length: length as usize,
-                    filters: dictionary.get("Filter")
-                        .and_then(Filter::from_vec)
-                        .unwrap_or(vec![]),
-                    dictionary,
-                })
-            } else {
-                None
-            },
-            _ => None,
+        let length = dictionary.integer("Length")?;
+
+        if length < 0 {
+            return None;
         }
+
+        Some(StreamMetadata {
+            length: length as usize,
+            filters: dictionary.get("Filter")
+                .and_then(Filter::from_vec)
+                .unwrap_or(vec![]),
+            dictionary,
+        })
+    }
+
+    fn from_inline_image(dictionary: PdfDictionary, length: usize)
+            -> Option<StreamMetadata> {
+
+        let filters = dictionary.get("Filter")
+            .or_else(|| dictionary.get("F"))
+            .and_then(Filter::from_vec_inline_image)
+            .unwrap_or(vec![]);
+
+        Some(StreamMetadata { length, filters, dictionary })
     }
 }
 
@@ -1006,6 +1045,13 @@ impl PdfObject {
 
     pub fn as_float_array(&self) -> Option<impl Iterator<Item = f64> + '_> {
         Some(self.as_array()?.iter().filter_map(PdfObject::as_float))
+    }
+
+    pub fn as_stream(&self) -> Option<&Stream> {
+        match self {
+            PdfObject::Stream(x) => Some(x),
+            _ => None,
+        }
     }
 
     pub fn as_boolean(&self) -> Option<bool> {
@@ -1176,7 +1222,7 @@ where F: FnMut(&Key) -> PdfObject {
     }
 
     let length = metadata.length;
-    let result = Stream::new(&data[0..length], metadata);
+    let result = Stream::new(&data[0..length], metadata, false);
     data = &data[length..];
 
     optional!(data, eol);
@@ -1625,9 +1671,6 @@ fn pdf(mut data: &[u8]) -> Res<'_, Pdf> {
 
             if let PdfObject::Stream(ref mut s) = result.object {
                 s.apply_filters()?;
-                if let Ok(utf8) = String::from_utf8(s.data.clone()) {
-                    println!("{}", utf8);
-                }
             }
         } else {
             result = repeat!(data, definition);
@@ -1673,13 +1716,310 @@ fn resolve<'a>(key: &Key, xref: &HashMap<u64, Xref>,
 }
 
 pub fn parse_pdf(data: &[u8]) -> Result<Pdf, String> {
-    let result = pdf(data);
+    pdf(data).into_result()
+}
 
-    match result {
-        Res::Found(r) => Ok(r.data),
-        Res::NotFound | Res::Error =>
-                Err("Could not parse file.".to_string()),
+pub fn parse_page(data: &[u8]) -> Result<Vec<(Vec<PdfObject>, Operator)>, String> {
+    println!("=== PAGE");
+    contents(data).into_result()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Table 51
+pub enum Operator {
+    // Table 57
+    GraphicsPush,
+    GraphicsPop,
+    TransformationMatrix,
+    LineWidth,
+    LineCap,
+    LineJoin,
+    MiterLimit,
+    DashPattern,
+    Intent,
+    Flatness,
+    DictName,
+
+    // Table 59
+    Subpath,
+    Line,
+    BezierCurve1,
+    BezierCurve2,
+    BezierCurve3,
+    EndSubpath,
+    Rectangle,
+
+    // Table 60
+    Stroke,
+    CloseAndStroke,
+    Fill,
+    FillOddRule,
+    FillAndStroke,
+    FilleAndStrokeOddRule,
+    CloseFillStroke,
+    CloseFillStorkeOddRule,
+    EndPath,
+
+    // Table 61
+    InsersectClippingPath,
+    InsersectClippingPathOddRule,
+
+    // Table 105
+    CharSpace,
+    WordSpace,
+    TextScale,
+    TextLeading,
+    FontSize,
+    TextRender,
+    TextRise,
+
+    // Table 107
+    BeginText,
+    EndText,
+
+    // Table 108
+    NextLineOffset,
+    NextLineOffset2,
+    StartLine,
+    StartLineLeadingParameter,
+
+    // Table 109
+    TextString,
+    NextLine,
+    NextLineWordSpacing,
+    TextStringSpacing,
+
+    // Table 74
+    ColorStroking,
+    ColorNonStroking,
+    ColorStrokingDevice,
+    ColorStrokingDeviceExtra,
+    ColorNonStrokingDevice,
+    ColorNonStrokingDeviceExtra,
+    ColorStrokingGray,
+    ColorNonStrokingGray,
+    ColorStrokingRGB,
+    ColorNonStrokingRGB,
+    ColorStrokingCMYK,
+    ColorNonStrokingCMYK,
+
+    // Table 113
+    GlyphWidth,
+    GlyphBoundingBox,
+
+    // Table 77
+    ShadingPattern,
+
+    // Table 92
+    InlineImageBegin,
+    InlineImageData,
+    EndInlineImage,
+
+    // Table 87
+    XObject,
+
+    // Table 320
+    PointTag,
+    TabProperties,
+    SequenceTagBegin,
+    SequenceTagBeginWithProperties,
+    SequenceTagEnd,
+
+    // Table 32
+    BeginCompatibility,
+    EndCompatibility,
+}
+
+const OPERATORS: [(Operator, &str); 73] = [
+    // Table 57
+    (Operator::GraphicsPush, "q"),
+    (Operator::GraphicsPop, "Q"),
+    (Operator::TransformationMatrix, "cm"),
+    (Operator::LineWidth, "w"),
+    (Operator::LineCap, "J"),
+    (Operator::LineJoin, "j"),
+    (Operator::MiterLimit, "M"),
+    (Operator::DashPattern, "d"),
+    (Operator::Intent, "ri"),
+    (Operator::Flatness, "i"),
+    (Operator::DictName, "gs"),
+
+    // Table 59
+    (Operator::Subpath, "m"),
+    (Operator::Line, "l"),
+    (Operator::BezierCurve1, "c"),
+    (Operator::BezierCurve2, "v"),
+    (Operator::BezierCurve3, "y"),
+    (Operator::EndSubpath, "h"),
+    (Operator::Rectangle, "re"),
+
+    // Table 107
+    (Operator::BeginText, "BT"),
+    (Operator::EndText, "ET"),
+
+    // Table 92
+    (Operator::InlineImageBegin, "BI"),
+    (Operator::InlineImageData, "ID"),
+    (Operator::EndInlineImage, "EI"),
+
+    // Table 60
+    (Operator::Stroke, "S"),
+    (Operator::CloseAndStroke, "s"),
+    (Operator::FillOddRule, "f*"),
+    (Operator::Fill, "f"),
+    (Operator::Fill, "F"),
+    (Operator::FilleAndStrokeOddRule, "B*"),
+    (Operator::FillAndStroke, "B"),
+    (Operator::CloseFillStroke, "b"),
+    (Operator::CloseFillStorkeOddRule, "b*"),
+    (Operator::EndPath, "n"),
+
+    // Table 61
+    (Operator::InsersectClippingPathOddRule, "W*"),
+    (Operator::InsersectClippingPath, "W"),
+
+    // Table 105
+    (Operator::CharSpace, "Tc"),
+    (Operator::WordSpace, "Tw"),
+    (Operator::TextScale, "Tz"),
+    (Operator::TextLeading, "TL"),
+    (Operator::FontSize, "Tf"),
+    (Operator::TextRender, "Tr"),
+    (Operator::TextRise, "Ts"),
+
+    // Table 108
+    (Operator::NextLineOffset, "Tm"),
+    (Operator::NextLineOffset2, "T*"),
+    (Operator::StartLine, "Td"),
+    (Operator::StartLineLeadingParameter, "TD"),
+
+    // Table 109
+    (Operator::TextString, "Tj"),
+    (Operator::NextLine, "'"),
+    (Operator::NextLineWordSpacing, "\""),
+    (Operator::TextStringSpacing, "TJ"),
+
+    // Table 74
+    (Operator::ColorStroking, "CS"),
+    (Operator::ColorNonStroking, "cs"),
+    (Operator::ColorStrokingDevice, "SC"),
+    (Operator::ColorStrokingDeviceExtra, "SCN"),
+    (Operator::ColorNonStrokingDevice, "sc"),
+    (Operator::ColorNonStrokingDeviceExtra, "scn"),
+    (Operator::ColorStrokingGray, "G"),
+    (Operator::ColorNonStrokingGray, "g"),
+    (Operator::ColorStrokingRGB, "RG"),
+    (Operator::ColorNonStrokingRGB, "rg"),
+    (Operator::ColorStrokingCMYK, "K"),
+    (Operator::ColorNonStrokingCMYK, "k"),
+
+    // Table 113
+    (Operator::GlyphWidth, "d0"),
+    (Operator::GlyphBoundingBox, "d1"),
+
+    // Table 77
+    (Operator::ShadingPattern, "sh"),
+
+    // Table 87
+    (Operator::XObject, "Do"),
+
+    // Table 320
+    (Operator::PointTag, "MP"),
+    (Operator::TabProperties, "DP"),
+    (Operator::SequenceTagBegin, "BMC"),
+    (Operator::SequenceTagBeginWithProperties, "BDC"),
+    (Operator::SequenceTagEnd, "EMC"),
+
+    // Table 32
+    (Operator::BeginCompatibility, "BX"),
+    (Operator::EndCompatibility, "EX"),
+];
+
+fn operator(data: &[u8]) -> Res<'_, Operator> {
+    for (op, text) in OPERATORS.iter() {
+        if let Res::Found(r) = exact(data, text) {
+            return Res::found(*op, r.remaining);
+        }
     }
+
+    Res::NotFound
+}
+
+// 8.9.7
+fn inline_image(mut data: &[u8]) -> Res<'_, Stream> {
+    let mut dict = HashMap::new();
+    loop {
+        let key = repeat!(data, identifier);
+        data = consume_whitespace(data);
+
+        let value = repeat!(data, object);
+        dict.insert(key, value);
+
+        data = consume_whitespace(data);
+    }
+
+    exact!(data, "ID");
+
+    if is_whitespace(data[0]) {
+        // Consume 1 byte of whitespace
+        data = &data[1..];
+    }
+
+    let mut end = 0;
+    while data.len() > end {
+        // TODO: This is likely really slow
+        if let Res::Found(_) = exact(&data[end..], "EI") {
+            break;
+        }
+        end += 1;
+    }
+
+    let image_data = &data[..end];
+    data = &data[end..];
+
+    exact!(data, "EI");
+
+    let metadata = StreamMetadata::from_inline_image(
+        PdfDictionary::new(dict),
+        image_data.len()).ok_or(String::new())?;
+
+    Res::found(Stream::new(image_data, metadata, true), data)
+}
+
+fn contents(mut data: &[u8])
+        -> Res<'_, Vec<(Vec<PdfObject>, Operator)>> {
+    let mut result = vec![];
+
+    data = consume_whitespace(data);
+
+    while data.len() > 0 {
+        let mut args = vec![];
+        loop {
+            let obj = repeat!(data, object);
+            args.push(obj);
+            data = consume_whitespace(data);
+        }
+
+        let op = repeat!(data, operator);
+        data = consume_whitespace(data);
+
+        if op == Operator::InlineImageBegin {
+            let image = block!(data, inline_image);
+            data = consume_whitespace(data);
+
+            result.push((vec![PdfObject::Stream(image)], op));
+        } else {
+            result.push((args, op));
+        }
+    }
+
+    if data.len() > 0 {
+        // TODO: fail gracefully
+        eprintln!("len = {}", data.len());
+        panic!();
+    }
+
+    Res::found(result, data)
 }
 
 #[cfg(test)]
